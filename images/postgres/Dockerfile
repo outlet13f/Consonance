@@ -11,5 +11,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/consonance-supervisor /usr/local/bin/consonance-supervisor
 USER 999:999
+# The supervisor shuts postgres down on SIGTERM (spec 7.3); postgres:17 would stop with SIGINT.
+STOPSIGNAL SIGTERM
 # tini is PID 1: it reaps orphaned processes and forwards SIGTERM to the supervisor.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/consonance-supervisor"]

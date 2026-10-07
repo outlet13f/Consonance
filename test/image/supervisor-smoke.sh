@@ -13,6 +13,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Spec 7.3: the supervisor shuts postgres down on SIGTERM. The postgres base image stops with SIGINT.
+stopsignal=$(docker image inspect --format '{{.Config.StopSignal}}' "$IMAGE")
+[ "$stopsignal" = SIGTERM ] || { echo "FAIL: image stop signal is '$stopsignal', want SIGTERM"; exit 1; }
+
 docker volume create "$NAME" >/dev/null
 docker run --rm -v "$NAME:/pgdata" --user 0 --entrypoint chown "$IMAGE" 999:999 /pgdata
 docker run --rm -v "$NAME:/pgdata" --entrypoint bash "$IMAGE" -c \
