@@ -299,15 +299,16 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 | --- | --- |
 | `GET /healthz` | 감독 프로세스 생존 (liveness) |
 | `GET /readyz` | PostgreSQL이 접속을 받으면 200 (readiness). 정지 상태면 503 |
-| `GET /v1/status` | `{pg: running/stopped/starting/stopping, generation, since}` |
-| `POST /v1/start` | `/pgdata/current`로 PostgreSQL 기동, 접속 가능까지 대기 |
+| `GET /v1/status` | `{pg: running/stopped/starting/stopping, generation, since}`. `generation`은 기동 중·실행 중·정지 중이면 PostgreSQL이 실제로 쓰는 세대, 정지 상태면 `current`가 가리키는 세대 |
+| `POST /v1/start` | 기동 시점에 `/pgdata/current`가 가리키는 세대 디렉터리로 PostgreSQL 기동, 접속 가능까지 대기. 대기 제한 시간을 넘기면 503(기동은 계속되므로 `/v1/status`로 확인). 실행 중인데 `current`가 다른 세대를 가리키면 409 |
 | `POST /v1/stop` | fast shutdown, 30초 안에 끝나지 않으면 immediate |
 | `POST /v1/backup/start` | 본문 `{label}`. 로컬 소켓 세션을 열어 `pg_backup_start(label, true)`, 세션 유지. 30초 안에 종료가 오지 않으면 세션을 닫아 백업 취소 |
 | `POST /v1/backup/stop` | 같은 세션에서 `pg_backup_stop(false)`, `{labelFile, stopLSN}` 반환 |
 | `POST /v1/bootstrap` | main 첫 기동 시 `app_owner` 역할과 `app` DB 생성(이미 있으면 건너뜀) |
 
 - 기동 옵션은 매번 명령행 `-c`로 준다: `port=5432`, `listen_addresses='*'`, `unix_socket_directories='/var/run/postgresql'`, `shared_buffers`=메모리 한도의 25%(Downward API로 받은 컨테이너 메모리 한도 기준), `max_connections=100`. 데이터 디렉터리의 설정 파일에 기대지 않아 사본 간 설정이 섞이지 않는다.
-- 모든 엔드포인트는 이미 원하는 상태면 아무것도 하지 않고 200을 돌려준다(이미 실행 중일 때 `start`, 이미 정지했을 때 `stop`, 계정이 있을 때 `bootstrap`).
+- `-D`에는 링크를 해석한 세대 경로(`/pgdata/data-N`)를 준다. 링크 자체를 주면 PostgreSQL이 `global/pg_control`을 링크 경로로 계속 써서, 실행 중에 링크를 바꾸면 다음 세대가 손상된다.
+- 상태를 정하는 엔드포인트는 이미 원하는 상태면 아무것도 하지 않고 200을 돌려준다(이미 실행 중일 때 `start`, 이미 정지했을 때 `stop`, 계정이 있을 때 `bootstrap`). 세션 작업인 `backup/start`·`backup/stop`은 예외로, 진행 중인 백업이 있을 때 시작하거나 세션 없이 종료하면 409다.
 - SIGTERM을 받으면 PostgreSQL을 fast shutdown한 뒤 종료한다.
 
 ### 7.4 REST API 서버 (`cmd/apiserver`, `internal/httpapi`)
