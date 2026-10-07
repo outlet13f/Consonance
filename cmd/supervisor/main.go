@@ -76,7 +76,13 @@ func run(args []string) error {
 	}
 	token, err := readSecret(c.tokenFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("token file: %w", err)
+	}
+	if c.dbPasswordFile != "" {
+		// Bootstrap reads the file again on every call; this only makes a bad one fail at startup.
+		if _, err := readSecret(c.dbPasswordFile); err != nil {
+			return fmt.Errorf("tenant password file: %w", err)
+		}
 	}
 
 	pg := pgctl.NewManager(c.postgresBin, pgctl.Options{
@@ -98,7 +104,7 @@ func run(args []string) error {
 		srv.Bootstrap = func(ctx context.Context) error {
 			pw, err := readSecret(c.dbPasswordFile)
 			if err != nil {
-				return err
+				return fmt.Errorf("tenant password file: %w", err)
 			}
 			return pgctl.Bootstrap(ctx, pg.ConnString(), pgctl.TenantRole, pgctl.TenantDatabase, pw)
 		}
@@ -144,12 +150,19 @@ func run(args []string) error {
 	return stopErr
 }
 
+// readSecret returns the trimmed contents of a secret file. An empty secret is an error: an empty
+// token would make the API answer 401 to everyone, and an empty tenant password would create a
+// login role without a password.
 func readSecret(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
-	return strings.TrimSpace(string(b)), nil
+	secret := strings.TrimSpace(string(b))
+	if secret == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	return secret, nil
 }
 
 func envInt64(name string) int64 {

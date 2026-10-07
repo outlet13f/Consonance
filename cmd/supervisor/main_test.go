@@ -330,3 +330,39 @@ func TestSupervisorSurvivesSIGHUP(t *testing.T) {
 		t.Fatalf("supervisor exit after SIGTERM: %v", p.waitErr)
 	}
 }
+
+// An empty secret is a deployment error, so the supervisor refuses to start: with an empty token
+// its API would answer 401 to everyone, and an empty tenant password would create a login role
+// without a password.
+func TestSupervisorRefusesEmptySecrets(t *testing.T) {
+	bin := buildSupervisor(t)
+	refuses := func(t *testing.T, secretArgs ...string) {
+		t.Helper()
+		root := t.TempDir()
+		p := startSupervisor(t, bin, append([]string{
+			"--postgres-bin", filepath.Join(root, "no-postgres"), // never run: --autostart=false
+			"--data-dir", filepath.Join(root, "data"),
+			"--listen", "127.0.0.1:" + strconv.Itoa(pgtest.FreePort(t)),
+			"--autostart=false",
+		}, secretArgs...)...)
+		if !p.exitedWithin(10 * time.Second) {
+			t.Fatal("supervisor still running 10s after it started: an empty secret must stop it at startup")
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(p.waitErr, &exitErr) || exitErr.ExitCode() <= 0 {
+			t.Fatalf("supervisor exit: %v, want a non-zero exit code", p.waitErr)
+		}
+		if logs := p.logs(); !strings.Contains(logs, "is empty") {
+			t.Fatalf("output does not say the secret is empty:\n%s", logs)
+		}
+	}
+	t.Run("empty token file", func(t *testing.T) {
+		refuses(t, "--token-file", writeFile(t, filepath.Join(t.TempDir(), "token"), " \n"))
+	})
+	t.Run("empty tenant password file", func(t *testing.T) {
+		dir := t.TempDir()
+		refuses(t,
+			"--token-file", writeFile(t, filepath.Join(dir, "token"), "tok\n"),
+			"--db-password-file", writeFile(t, filepath.Join(dir, "password"), "\n"))
+	})
+}
