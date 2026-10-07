@@ -119,6 +119,29 @@ func TestStartOnAnotherGenerationIs409(t *testing.T) {
 	}
 }
 
+// A start that outlasts StartTimeout has not failed: postgres keeps starting (crash recovery can
+// take longer), so the caller is told to follow it on /v1/status rather than given a 500.
+func TestStartTimeoutIs503(t *testing.T) {
+	pg := supervisortest.NewFakePostgres(pgctl.StateStopped)
+	pg.StartHangs = true
+	h := (&supervisor.Server{
+		Token:        token,
+		PG:           pg,
+		Backups:      &supervisortest.FakeBackups{},
+		Generation:   func() string { return "data-1" },
+		StopGrace:    time.Second,
+		StartTimeout: 50 * time.Millisecond,
+	}).Handler()
+
+	rec := call(h, "POST", "/v1/start", token, "")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("start past StartTimeout = %d %s, want 503", rec.Code, rec.Body)
+	}
+	if msg := decode[supervisorapi.Error](t, rec).Error; !strings.Contains(msg, "/v1/status") {
+		t.Fatalf("error = %q, want it to send the caller to /v1/status", msg)
+	}
+}
+
 func TestStopIsIdempotent(t *testing.T) {
 	pg := supervisortest.NewFakePostgres(pgctl.StateRunning)
 	h := newHandler(pg, &supervisortest.FakeBackups{}, nil)

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -91,6 +92,11 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, pgctl.ErrBusy), errors.Is(err, pgctl.ErrGenerationMismatch):
 			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, context.DeadlineExceeded):
+			// StartTimeout only bounds the wait; postgres keeps starting (crash recovery can take
+			// longer), so this is not a failure yet.
+			writeError(w, http.StatusServiceUnavailable, fmt.Sprintf(
+				"postgres did not accept connections within %s and is still starting; poll GET /v1/status until it is running", s.StartTimeout))
 		default:
 			writeError(w, http.StatusInternalServerError, err.Error())
 		}

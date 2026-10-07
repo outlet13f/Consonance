@@ -16,6 +16,9 @@ type FakePostgres struct {
 	stopCtxErr error // ctx.Err() as the latest Stop call saw it
 	StartErr   error
 	StopErr    error
+	// StartHangs makes Start leave postgres starting and return only when its context ends, as
+	// pgctl.Manager.Start does while postgres is slow to accept connections (crash recovery).
+	StartHangs bool
 }
 
 // NewFakePostgres returns a FakePostgres in the given state.
@@ -25,11 +28,18 @@ func NewFakePostgres(state pgctl.State) *FakePostgres {
 
 func (f *FakePostgres) Start(ctx context.Context) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.StartErr != nil {
+		f.mu.Unlock()
 		return f.StartErr
 	}
+	if f.StartHangs {
+		f.state = pgctl.StateStarting
+		f.mu.Unlock()
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.state = pgctl.StateRunning
+	f.mu.Unlock()
 	return nil
 }
 
