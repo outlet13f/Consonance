@@ -65,6 +65,11 @@ func parseFlags(args []string) (config, error) {
 }
 
 func run(args []string) error {
+	// Go exits on SIGHUP by default, and in the image tini would follow and postgres would be
+	// SIGKILLed. A SIGHUP ("reload", a habit with postgres containers) has nothing to reload here:
+	// every setting is passed on the command line.
+	signal.Ignore(syscall.SIGHUP)
+
 	c, err := parseFlags(args)
 	if err != nil {
 		return err

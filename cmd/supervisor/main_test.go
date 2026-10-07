@@ -47,6 +47,58 @@ func writeFile(t *testing.T, path, content string) string {
 	return path
 }
 
+// supervisorProc is a supervisor binary started by a test, with its output in a log file.
+type supervisorProc struct {
+	cmd     *exec.Cmd
+	exited  chan struct{} // closed once the process has exited; waitErr is set by then
+	waitErr error
+	logPath string
+}
+
+// startSupervisor runs the supervisor binary bin with args. The process is killed when the test
+// ends, and its output is logged if the test failed.
+func startSupervisor(t *testing.T, bin string, args ...string) *supervisorProc {
+	t.Helper()
+	p := &supervisorProc{exited: make(chan struct{}), logPath: filepath.Join(t.TempDir(), "supervisor.log")}
+	logFile, err := os.Create(p.logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	p.cmd = exec.Command(bin, args...)
+	p.cmd.Stdout, p.cmd.Stderr = logFile, logFile
+	if err := p.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { p.waitErr = p.cmd.Wait(); close(p.exited) }()
+	t.Cleanup(func() {
+		_ = p.cmd.Process.Kill() // no-op once it has exited
+		<-p.exited
+		if t.Failed() {
+			t.Logf("supervisor output:\n%s", p.logs())
+		}
+	})
+	return p
+}
+
+// exitedWithin waits up to d for the process to exit and reports whether it did.
+func (p *supervisorProc) exitedWithin(d time.Duration) bool {
+	select {
+	case <-p.exited:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+func (p *supervisorProc) logs() string {
+	b, err := os.ReadFile(p.logPath)
+	if err != nil {
+		return err.Error()
+	}
+	return string(b)
+}
+
 func TestSupervisorLifecycle(t *testing.T) {
 	bin := pgtest.BinDir(t)
 	root := t.TempDir()
@@ -233,5 +285,48 @@ func TestSupervisorShutsDownWhileAutostartWaits(t *testing.T) {
 	}
 	if strings.Contains(string(logs), "autostart failed") {
 		t.Errorf("a signal that cancels autostart is not an autostart failure:\n%s", logs)
+	}
+}
+
+// "Reloading" a postgres container with SIGHUP is a common habit. Go's default for SIGHUP is to
+// exit, and in the image tini would then exit too and take postgres down with SIGKILL. The
+// supervisor must neither die nor start a shutdown, and must keep serving.
+func TestSupervisorSurvivesSIGHUP(t *testing.T) {
+	root := t.TempDir()
+	apiPort := pgtest.FreePort(t)
+	p := startSupervisor(t, buildSupervisor(t),
+		"--postgres-bin", filepath.Join(root, "no-postgres"), // never run: --autostart=false
+		"--data-dir", filepath.Join(root, "data"),
+		"--listen", "127.0.0.1:"+strconv.Itoa(apiPort),
+		"--token-file", writeFile(t, filepath.Join(root, "token"), "tok\n"),
+		"--autostart=false",
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c := supervisorclient.New("http://127.0.0.1:"+strconv.Itoa(apiPort), "tok", nil)
+	eventually(t, 10*time.Second, func() bool {
+		_, err := c.Status(ctx)
+		return err == nil
+	})
+
+	if err := p.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	// Dying of SIGHUP, or shutting down on it, takes milliseconds.
+	if p.exitedWithin(500 * time.Millisecond) {
+		t.Fatalf("supervisor exited on SIGHUP: %v", p.waitErr)
+	}
+	if _, err := c.Status(ctx); err != nil {
+		t.Fatalf("status after SIGHUP: %v", err)
+	}
+
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if !p.exitedWithin(10 * time.Second) {
+		t.Fatal("supervisor still running 10s after SIGTERM")
+	}
+	if p.waitErr != nil {
+		t.Fatalf("supervisor exit after SIGTERM: %v", p.waitErr)
 	}
 }
