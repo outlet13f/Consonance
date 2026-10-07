@@ -2,6 +2,7 @@ package main_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,5 +119,119 @@ func TestSupervisorLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "shut down") {
 		t.Fatalf("cluster was not shut down cleanly:\n%s", out)
+	}
+}
+
+// fakePostmaster stands in for a postmaster that is stuck in crash recovery: it records its pid
+// and never accepts connections. Like postgres it shuts down cleanly on SIGINT (fast shutdown)
+// and dies at once on SIGQUIT (immediate shutdown). The marker files show which of the two the
+// supervisor asked for.
+const fakePostmaster = `#!/bin/sh
+trap ': > "$FAKE_PG_DIR/got-int"; fast=1' INT
+trap ': > "$FAKE_PG_DIR/got-quit"; exit 3' QUIT
+echo $$ > "$FAKE_PG_DIR/pid.tmp" && mv "$FAKE_PG_DIR/pid.tmp" "$FAKE_PG_DIR/pid"
+while [ -z "$fast" ]; do sleep 0.1; done
+sleep 0.3
+exit 0
+`
+
+// TestSupervisorShutsDownWhileAutostartWaits covers a pod that is deleted while postgres is still
+// starting (slow crash recovery). The postmaster never becomes ready, so autostart waits out its
+// whole --start-timeout unless the signal cuts the wait short. SIGTERM must reach the shutdown
+// path at once: the supervisor asks the starting postmaster for a fast shutdown (not an immediate
+// one) and exits 0 within seconds instead of after 60s. It needs no PostgreSQL, so it runs on
+// every host.
+func TestSupervisorShutsDownWhileAutostartWaits(t *testing.T) {
+	root := t.TempDir()
+	fakePG := writeFile(t, filepath.Join(root, "fake-postgres"), fakePostmaster)
+	if err := os.Chmod(fakePG, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "supervisor.log")
+	logFile, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	apiPort := pgtest.FreePort(t)
+
+	cmd := exec.Command(buildSupervisor(t),
+		"--postgres-bin", fakePG,
+		"--data-dir", filepath.Join(root, "data"),
+		"--socket-dir", pgtest.SocketDir(t),
+		"--port", strconv.Itoa(pgtest.FreePort(t)),
+		"--listen", "127.0.0.1:"+strconv.Itoa(apiPort),
+		"--token-file", writeFile(t, filepath.Join(root, "token"), "tok\n"),
+		"--autostart=true",
+		"--start-timeout=60s",
+	)
+	cmd.Env = append(os.Environ(), "FAKE_PG_DIR="+root)
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	var waitErr error
+	go func() { waitErr = cmd.Wait(); close(exited) }()
+	var pid int // the fake postmaster
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill() // no-op once it has exited
+		<-exited
+		if t.Failed() {
+			if pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL) // never leave a postmaster behind
+			}
+			if out, err := os.ReadFile(logPath); err == nil {
+				t.Logf("supervisor output:\n%s", out)
+			}
+		}
+	})
+
+	// Wait until autostart is blocked on a postmaster that will not become ready.
+	eventually(t, 15*time.Second, func() bool {
+		b, err := os.ReadFile(filepath.Join(root, "pid"))
+		if err != nil {
+			return false
+		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+		return err == nil
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	c := supervisorclient.New("http://127.0.0.1:"+strconv.Itoa(apiPort), "tok", nil)
+	eventually(t, 10*time.Second, func() bool {
+		st, err := c.Status(ctx)
+		return err == nil && st.PG == supervisorapi.PGStarting
+	})
+
+	signalled := time.Now()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		t.Fatal("supervisor still running 10s after SIGTERM: the signal did not cut short the autostart wait (--start-timeout is 60s)")
+	}
+	t.Logf("supervisor exited %s after SIGTERM", time.Since(signalled).Round(time.Millisecond))
+	if waitErr != nil {
+		t.Fatalf("supervisor exit: %v", waitErr)
+	}
+
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("postmaster %d outlived the supervisor (kill -0: %v)", pid, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "got-int")); err != nil {
+		t.Errorf("the starting postmaster never got a fast shutdown (SIGINT): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "got-quit")); err == nil {
+		t.Error("the starting postmaster got an immediate shutdown (SIGQUIT): Stop must run on a context that outlives the signal")
+	}
+	logs, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logs), "autostart failed") {
+		t.Errorf("a signal that cancels autostart is not an autostart failure:\n%s", logs)
 	}
 }

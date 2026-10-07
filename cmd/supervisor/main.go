@@ -104,29 +104,35 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", c.listen, err)
 	}
+
+	// Register the shutdown signals before the API starts serving: from then on POST /v1/start
+	// can launch a postmaster, and a SIGTERM that reached Go's default handler would kill the
+	// supervisor and orphan it. The signal also cancels sigCtx, which cuts the autostart wait
+	// short. A pod deleted while postgres is still starting (slow crash recovery) then gets its
+	// fast shutdown at once, not after --start-timeout, which can outlast the pod's grace period.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	httpSrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = httpSrv.Serve(ln) }()
 	slog.Info("supervisor listening", "addr", ln.Addr().String(), "dataDir", c.dataDir)
 
-	// Register the shutdown signals before autostart. A SIGTERM that arrives while postgres is
-	// still starting (crash recovery can be slow) is held until autostart returns and is then
-	// handled below. Registered later, it would hit Go's default handler, which kills the
-	// supervisor and orphans the postmaster.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
-
 	if c.autostart {
-		ctx, cancel := context.WithTimeout(context.Background(), c.startTimeout)
-		if err := pg.Start(ctx); err != nil {
+		// The context only bounds the wait. When the signal cancels it, Start returns but the
+		// postmaster keeps starting, and the Stop below sends it the fast shutdown.
+		ctx, cancel := context.WithTimeout(sigCtx, c.startTimeout)
+		if err := pg.Start(ctx); err != nil && sigCtx.Err() == nil {
 			// Keep serving: the operator retries through POST /v1/start.
 			slog.Error("autostart failed", "err", err)
 		}
 		cancel()
 	}
 
-	sig := <-sigs
-	slog.Info("shutting down", "signal", sig.String())
+	<-sigCtx.Done()
+	slog.Info("shutting down")
 
+	// Not derived from sigCtx, which is already cancelled: Stop escalates to an immediate
+	// shutdown as soon as its context ends.
 	ctx, cancel := context.WithTimeout(context.Background(), c.stopGrace+15*time.Second)
 	defer cancel()
 	stopErr := pg.Stop(ctx, c.stopGrace)
