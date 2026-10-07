@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -98,6 +99,23 @@ func TestStartWhileBusyIs409(t *testing.T) {
 	h := newHandler(pg, &supervisortest.FakeBackups{}, nil)
 	if rec := call(h, "POST", "/v1/start", token, ""); rec.Code != http.StatusConflict {
 		t.Fatalf("start while busy = %d, want 409", rec.Code)
+	}
+}
+
+// Postgres runs one generation while /pgdata/current points to another: the caller asked for the
+// linked generation, so a 200 "already running" would be a lie (spec 9.4 would then detach the
+// directory postgres runs in).
+func TestStartOnAnotherGenerationIs409(t *testing.T) {
+	pg := supervisortest.NewFakePostgres(pgctl.StateRunning)
+	pg.StartErr = fmt.Errorf("%w: it runs data-1, current now points to data-2", pgctl.ErrGenerationMismatch)
+	h := newHandler(pg, &supervisortest.FakeBackups{}, nil)
+
+	rec := call(h, "POST", "/v1/start", token, "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("start on another generation = %d %s, want 409", rec.Code, rec.Body)
+	}
+	if msg := decode[supervisorapi.Error](t, rec).Error; msg != pg.StartErr.Error() {
+		t.Fatalf("error = %q, want the mismatch with both generations: %q", msg, pg.StartErr)
 	}
 }
 

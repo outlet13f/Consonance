@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -86,7 +85,7 @@ func run(args []string) error {
 		Token:        token,
 		PG:           pg,
 		Backups:      pgctl.NewBackups(pg.ConnString(), c.backupTimeout),
-		Generation:   func() string { return generationOf(c.dataDir) },
+		Generation:   pg.Generation,
 		StopGrace:    c.stopGrace,
 		StartTimeout: c.startTimeout,
 	}
@@ -138,15 +137,6 @@ func run(args []string) error {
 	stopErr := pg.Stop(ctx, c.stopGrace)
 	_ = httpSrv.Shutdown(ctx)
 	return stopErr
-}
-
-// generationOf returns the generation that the data directory symlink points to.
-func generationOf(dataDir string) string {
-	target, err := os.Readlink(dataDir)
-	if err != nil {
-		return ""
-	}
-	return filepath.Base(target)
 }
 
 func readSecret(path string) (string, error) {

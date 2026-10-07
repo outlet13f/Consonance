@@ -35,7 +35,7 @@ type Server struct {
 	PG           Postgres
 	Backups      Backups
 	Bootstrap    func(ctx context.Context) error // nil unless this pod runs main
-	Generation   func() string                   // current generation, e.g. "data-3"
+	Generation   func() string                   // generation postgres runs, e.g. "data-3" (pgctl.Manager.Generation)
 	StopGrace    time.Duration
 	StartTimeout time.Duration
 
@@ -88,11 +88,12 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.StartTimeout)
 	defer cancel()
 	if err := s.PG.Start(ctx); err != nil {
-		if errors.Is(err, pgctl.ErrBusy) {
+		switch {
+		case errors.Is(err, pgctl.ErrBusy), errors.Is(err, pgctl.ErrGenerationMismatch):
 			writeError(w, http.StatusConflict, err.Error())
-			return
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
 		}
-		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, s.currentStatus())

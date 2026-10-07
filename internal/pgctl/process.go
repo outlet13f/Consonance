@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -26,17 +27,22 @@ const (
 // ErrBusy is returned when a start is requested while a start or stop is in progress.
 var ErrBusy = errors.New("postgres is starting or stopping")
 
+// ErrGenerationMismatch is returned by Start when postgres runs but the data directory link
+// now points to another generation than the one postgres was started on.
+var ErrGenerationMismatch = errors.New("postgres runs a different generation than the data directory points to")
+
 // Manager runs one postmaster as a child process.
 type Manager struct {
 	postgresBin string
 	opts        Options
 
-	mu      sync.Mutex
-	cmd     *exec.Cmd
-	done    chan struct{} // closed after the current postmaster exits and state is updated
-	exitErr error
-	state   State
-	since   time.Time
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	done     chan struct{} // closed after the current postmaster exits and state is updated
+	exitErr  error
+	state    State
+	since    time.Time
+	launched string // directory the current postmaster runs in: opts.DataDir resolved at launch
 }
 
 // NewManager returns a Manager in the stopped state.
@@ -88,20 +94,65 @@ func (m *Manager) Ready(ctx context.Context) bool {
 	return conn.Ping(ctx) == nil
 }
 
+// Generation returns the generation postgres runs, e.g. "data-3": the base name of the
+// directory the data directory link pointed to when postgres was started. While postgres is
+// stopped it returns the generation the link points to now, which the next start runs, or ""
+// when the link does not resolve.
+func (m *Manager) Generation() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state == StateStopped {
+		return generationOf(resolveDir(m.opts.DataDir))
+	}
+	return generationOf(m.launched)
+}
+
+// resolveDir returns dir with every symbolic link resolved, or "" when it does not resolve.
+func resolveDir(dir string) string {
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return ""
+	}
+	return resolved
+}
+
+// generationOf names the generation stored in dir, e.g. "data-3" for /pgdata/data-3.
+func generationOf(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Base(dir)
+}
+
 // Start launches postgres if needed and waits until it accepts connections.
-// It is a no-op when postgres is already running and returns ErrBusy while
+// It is a no-op when postgres already runs the generation the data directory link points to,
+// returns ErrGenerationMismatch when postgres runs another one, and returns ErrBusy while
 // another start or a stop is in progress.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	switch m.state {
 	case StateRunning:
+		running, linked := m.launched, resolveDir(m.opts.DataDir)
 		m.mu.Unlock()
+		if linked != running {
+			return fmt.Errorf("%w: it runs %q, but %s points to %q; stop postgres before starting another generation",
+				ErrGenerationMismatch, generationOf(running), m.opts.DataDir, generationOf(linked))
+		}
 		return nil
 	case StateStarting, StateStopping:
 		m.mu.Unlock()
 		return ErrBusy
 	}
-	cmd := exec.Command(m.postgresBin, Args(m.opts)...)
+	// Start postgres on the directory the link points to now, not through the link: for as long
+	// as it runs, postgres opens some files (pg_control) by their path under its data directory,
+	// so given the link, a switch made while it runs would send those writes into the other
+	// generation. When the link does not resolve, postgres gets it as is and reports the error.
+	dir := resolveDir(m.opts.DataDir)
+	opts := m.opts
+	if dir != "" {
+		opts.DataDir = dir
+	}
+	cmd := exec.Command(m.postgresBin, Args(opts)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	// Own process group, so signals aimed at the supervisor never reach postgres directly.
@@ -111,7 +162,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("start postgres: %w", err)
 	}
 	done := make(chan struct{})
-	m.cmd, m.done, m.exitErr = cmd, done, nil
+	m.cmd, m.done, m.exitErr, m.launched = cmd, done, nil, dir
 	m.setStateLocked(StateStarting)
 	m.mu.Unlock()
 

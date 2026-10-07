@@ -23,7 +23,7 @@ const (
 // Status is returned by GET /v1/status and by the start, stop and bootstrap calls.
 type Status struct {
 	PG         PGState   `json:"pg"`
-	Generation string    `json:"generation"` // target of /pgdata/current, e.g. "data-3"
+	Generation string    `json:"generation"` // generation postgres runs, e.g. "data-3"; while stopped, the target of /pgdata/current
 	Since      time.Time `json:"since"`
 }
 
