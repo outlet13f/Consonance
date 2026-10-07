@@ -1,11 +1,14 @@
 package pgctl_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"consonance/internal/pgctl"
 )
@@ -40,25 +43,46 @@ func TestBackupBeginEnd(t *testing.T) {
 	}
 }
 
+// PostgreSQL aborts a non-exclusive backup when the session that started it ends, so the
+// session's backend leaving pg_stat_activity is what shows the timeout aborted the backup on the
+// server. A new backup starting would show nothing: PostgreSQL runs non-exclusive backups of
+// different sessions side by side.
 func TestBackupTimeoutAbortsSession(t *testing.T) {
 	m := startedManager(t)
 	ctx := testCtx(t)
-	b := pgctl.NewBackups(m.ConnString(), 200*time.Millisecond)
+	b := pgctl.NewBackups(m.ConnString(), time.Second)
+	t.Cleanup(b.Abort)
+
+	watcher, err := pgx.Connect(ctx, m.ConnString())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer watcher.Close(context.Background())
+	backendAlive := func(pid uint32) bool {
+		var alive bool
+		if err := watcher.QueryRow(ctx,
+			"SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1)", int64(pid)).Scan(&alive); err != nil {
+			t.Fatalf("query pg_stat_activity: %v", err)
+		}
+		return alive
+	}
 
 	if _, err := b.Begin(ctx, "will-time-out"); err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	time.Sleep(600 * time.Millisecond)
-	if b.InProgress() {
-		t.Fatal("session still open after the timeout")
+	session := b.OpenSession()
+	if session == nil {
+		t.Fatal("no open session right after begin")
 	}
-	// PostgreSQL aborted the backup when the session closed, so a new one starts at once.
-	if _, err := b.Begin(ctx, "after-timeout"); err != nil {
-		t.Fatalf("begin after timeout: %v", err)
+	pid := session.PgConn().PID()
+	if !backendAlive(pid) {
+		t.Fatalf("backend %d of the backup session is not in pg_stat_activity", pid)
 	}
-	if _, _, err := b.End(ctx); err != nil {
-		t.Fatalf("end: %v", err)
-	}
+
+	waitFor(t, 10*time.Second, "the session to time out", func() bool { return !b.InProgress() })
+	waitFor(t, 10*time.Second, "the backup session's backend to leave pg_stat_activity", func() bool {
+		return !backendAlive(pid)
+	})
 }
 
 // A session closed by its own timeout ends the backup behind the caller's back (its
