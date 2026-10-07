@@ -52,7 +52,7 @@ func (b *Backups) Begin(ctx context.Context, label string) (string, error) {
 		return "", fmt.Errorf("pg_backup_start: %w", err)
 	}
 	b.conn = conn
-	b.timer = time.AfterFunc(b.timeout, b.Abort)
+	b.timer = time.AfterFunc(b.timeout, func() { b.expire(conn) })
 	return lsn, nil
 }
 
@@ -78,6 +78,24 @@ func (b *Backups) End(ctx context.Context) (labelFile, stopLSN string, err error
 func (b *Backups) Abort() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.closeLocked()
+}
+
+// expire is what the timer armed for conn's session runs once the timeout passes. It
+// closes that session only. The timer can fire after its session has already ended (End
+// or Abort took the lock first), when b.conn may be a newer session that has not reached
+// its own timeout and must stay open.
+func (b *Backups) expire(conn *pgx.Conn) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.conn != conn {
+		return
+	}
+	b.closeLocked()
+}
+
+// closeLocked closes the open session, if any. The caller holds b.mu.
+func (b *Backups) closeLocked() {
 	if b.conn == nil {
 		return
 	}
