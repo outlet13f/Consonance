@@ -1,13 +1,18 @@
 package pgctl_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -46,6 +51,60 @@ func testCtx(t *testing.T) context.Context {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	return ctx
+}
+
+// waitFor polls cond until it holds and fails the test once timeout has passed.
+func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("waited %s for %s", timeout, what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// logBuffer collects what the default slog logger writes during a test.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// line returns the first logged line that contains s, or "" when there is none.
+func (b *logBuffer) line(s string) string {
+	for _, l := range strings.Split(b.String(), "\n") {
+		if strings.Contains(l, s) {
+			return l
+		}
+	}
+	return ""
+}
+
+// captureLogs sends the default slog logger to a buffer until the test ends.
+func captureLogs(t *testing.T) *logBuffer {
+	t.Helper()
+	b := &logBuffer{}
+	prev, prevOut, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(b, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut) // SetDefault pointed the log package at b as well
+		log.SetFlags(prevFlags)
+	})
+	return b
 }
 
 func TestStartStopRestart(t *testing.T) {
@@ -104,6 +163,39 @@ func TestCrashMovesToStopped(t *testing.T) {
 	}
 	if err := m.Start(ctx); err != nil {
 		t.Fatalf("start after crash: %v", err)
+	}
+}
+
+// A postmaster that exits without a stop request (a crash, an OOM kill) does so behind every
+// caller's back, so the log has to say it, with the exit error. A requested stop is no news.
+func TestUnrequestedExitIsLogged(t *testing.T) {
+	logs := captureLogs(t)
+	m := startedManager(t)
+	ctx := testCtx(t)
+
+	if err := m.Stop(ctx, 10*time.Second); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if l := logs.line("without a stop request"); l != "" {
+		t.Fatalf("a requested stop was logged as an exit without one: %s", l)
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pid := m.PID()
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	var l string
+	waitFor(t, 5*time.Second, "the exit to be logged", func() bool {
+		l = logs.line("postgres exited without a stop request")
+		return l != ""
+	})
+	for _, want := range []string{fmt.Sprintf("pid=%d", pid), "state=running", `err="signal: killed"`} {
+		if !strings.Contains(l, want) {
+			t.Errorf("log line lacks %s: %s", want, l)
+		}
 	}
 }
 

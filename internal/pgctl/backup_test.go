@@ -2,6 +2,7 @@ package pgctl_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,44 @@ func TestBackupTimeoutAbortsSession(t *testing.T) {
 	}
 	if _, _, err := b.End(ctx); err != nil {
 		t.Fatalf("end: %v", err)
+	}
+}
+
+// A session closed by its own timeout ends the backup behind the caller's back (its
+// backup/stop then finds no backup), so the log has to say it. ExpireSession runs what the
+// timer runs, at a chosen moment; a late expiry that closes nothing logs nothing.
+func TestBackupExpiryIsLogged(t *testing.T) {
+	logs := captureLogs(t)
+	m := startedManager(t)
+	ctx := testCtx(t)
+	b := pgctl.NewBackups(m.ConnString(), time.Minute) // only the test fires expiries
+	t.Cleanup(b.Abort)
+
+	if _, err := b.Begin(ctx, "ended"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	ended := b.OpenSession()
+	if _, _, err := b.End(ctx); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+	b.ExpireSession(ended)
+	if l := logs.line("timed out"); l != "" {
+		t.Fatalf("an expiry that closed nothing was logged: %s", l)
+	}
+
+	if _, err := b.Begin(ctx, "expires"); err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	session := b.OpenSession()
+	b.ExpireSession(session)
+	l := logs.line("backup session timed out")
+	if l == "" {
+		t.Fatalf("the expiry that closed the session was not logged:\n%s", logs)
+	}
+	for _, want := range []string{"timeout=1m0s", fmt.Sprintf("backendPID=%d", session.PgConn().PID())} {
+		if !strings.Contains(l, want) {
+			t.Errorf("log line lacks %s: %s", want, l)
+		}
 	}
 }
 

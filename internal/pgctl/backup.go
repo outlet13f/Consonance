@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -91,7 +92,11 @@ func (b *Backups) expire(conn *pgx.Conn) {
 	if b.conn != conn {
 		return
 	}
+	pid := conn.PgConn().PID()
 	b.closeLocked()
+	// Behind the caller's back: its End now finds no backup.
+	slog.Warn("backup session timed out; closed it, so PostgreSQL aborts the backup",
+		"timeout", b.timeout.String(), "backendPID", pid)
 }
 
 // closeLocked closes the open session, if any. The caller holds b.mu.

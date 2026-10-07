@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -169,11 +170,17 @@ func (m *Manager) Start(ctx context.Context) error {
 	go func() {
 		err := cmd.Wait()
 		m.mu.Lock()
+		unrequested, state := false, m.state
 		if m.cmd == cmd {
+			unrequested = state != StateStopping
 			m.cmd, m.exitErr = nil, err
 			m.setStateLocked(StateStopped)
 		}
 		m.mu.Unlock()
+		if unrequested { // a crash or a kill from outside: no caller hears of it otherwise
+			slog.Error("postgres exited without a stop request",
+				"pid", cmd.Process.Pid, "state", string(state), "generation", generationOf(dir), "err", err)
+		}
 		close(done)
 	}()
 
