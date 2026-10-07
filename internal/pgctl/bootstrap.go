@@ -22,6 +22,14 @@ func Bootstrap(ctx context.Context, connString, role, database, password string)
 	}
 	defer conn.Close(context.Background())
 
+	// Keep the password out of the server log. Statement logging would log CREATE ROLE ...
+	// PASSWORD '<plain>' and the parameters of the format() call that builds it, and
+	// log_min_error_statement would log the statement if it failed. Both are superuser settings,
+	// and this is the superuser's session.
+	if _, err := conn.Exec(ctx, "SET log_statement = 'none'; SET log_min_error_statement = 'panic'"); err != nil {
+		return fmt.Errorf("turn off statement logging: %w", err)
+	}
+
 	var exists bool
 	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", role).Scan(&exists); err != nil {
 		return fmt.Errorf("check role: %w", err)
