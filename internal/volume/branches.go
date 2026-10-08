@@ -10,9 +10,9 @@ import (
 )
 
 // CreateBranchData makes the data of a new branch (spec 7.2 POST /v1/branches/{name}/data,
-// 9.2): generation data-1 holding a copy of the parent's running database, with current
-// pointing at it. When the branch already has data it changes nothing and returns the current
-// generation, so the operator can retry.
+// 9.2): generation data-1 holding a copy of the parent's running database (ParentLatest) or of
+// one of the parent's restore points, with current pointing at it. When the branch already has
+// data it changes nothing and returns the current generation, so the operator can retry.
 func (v *Volume) CreateBranchData(ctx context.Context, name string, req agentapi.CreateBranchDataRequest) (agentapi.BranchData, error) {
 	if !agentapi.ValidBranchName(name) || name == agentapi.MainBranch {
 		return agentapi.BranchData{}, fmt.Errorf("%w: branch name %q", ErrInvalid, name)
@@ -20,7 +20,13 @@ func (v *Volume) CreateBranchData(ctx context.Context, name string, req agentapi
 	if !agentapi.ValidBranchName(req.Parent) || req.Parent == name {
 		return agentapi.BranchData{}, fmt.Errorf("%w: parent %q", ErrInvalid, req.Parent)
 	}
-	if req.Source.Type != agentapi.SourceParentLatest {
+	switch req.Source.Type {
+	case agentapi.SourceParentLatest:
+	case agentapi.SourceRestorePoint:
+		if !agentapi.ValidRestorePointID(req.Source.RestorePointID) {
+			return agentapi.BranchData{}, fmt.Errorf("%w: restore point %q", ErrInvalid, req.Source.RestorePointID)
+		}
+	default:
 		return agentapi.BranchData{}, fmt.Errorf("%w: source type %q", ErrInvalid, req.Source.Type)
 	}
 	release, err := v.acquire(ctx)
@@ -36,20 +42,31 @@ func (v *Volume) CreateBranchData(ctx context.Context, name string, req agentapi
 	if !errors.Is(err, ErrNotFound) {
 		return agentapi.BranchData{}, err // never replace a branch whose data could not be read
 	}
-	if _, err := v.currentGeneration(req.Parent); errors.Is(err, ErrNotFound) {
-		return agentapi.BranchData{}, fmt.Errorf("%w: parent %q has no data", ErrNotFound, req.Parent)
-	} else if err != nil {
-		return agentapi.BranchData{}, err
-	}
-	if err := v.checkCopyInterval(req.Parent); err != nil {
-		return agentapi.BranchData{}, err
+	var fill func(dst string) (string, error)
+	if req.Source.Type == agentapi.SourceRestorePoint {
+		// A restore point is copied without touching the parent's server: no interval applies.
+		rp, dir, err := v.findRestorePoint(req.Parent, req.Source.RestorePointID)
+		if err != nil {
+			return agentapi.BranchData{}, err
+		}
+		fill = func(dst string) (string, error) { return rp.BackupStartLSN, CloneTree(dir, dst, skipMarker) }
+	} else {
+		if _, err := v.currentGeneration(req.Parent); errors.Is(err, ErrNotFound) {
+			return agentapi.BranchData{}, fmt.Errorf("%w: parent %q has no data", ErrNotFound, req.Parent)
+		} else if err != nil {
+			return agentapi.BranchData{}, err
+		}
+		if err := v.checkCopyInterval(req.Parent); err != nil {
+			return agentapi.BranchData{}, err
+		}
+		fill = func(dst string) (string, error) {
+			return v.snapshot(ctx, req.Parent, dst, "consonance branch "+name)
+		}
 	}
 	if err := v.checkSpace(); err != nil {
 		return agentapi.BranchData{}, err
 	}
-	lsn, err := v.makeFirstGeneration(name, func(dst string) (string, error) {
-		return v.snapshot(ctx, req.Parent, dst, "consonance branch "+name)
-	})
+	lsn, err := v.makeFirstGeneration(name, fill)
 	if err != nil {
 		return agentapi.BranchData{}, err
 	}
