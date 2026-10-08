@@ -142,7 +142,8 @@ func (v *Volume) ActivateGeneration(ctx context.Context, branch string, n int) (
 // DetachGeneration moves data-n out of the branch (spec 7.2, 9.4 Detaching): into
 // branches/<toBranch>/data-1 as a new branch (a rollback's backup branch) or into a restore
 // point with reason "reset". data-n must not be current, and the branch's PostgreSQL must not
-// be running it. A retried detach into a branch that was completed returns that branch.
+// be running it. A retried detach that was completed answers like the first call: with the
+// branch, or with the restore point the reset made.
 func (v *Volume) DetachGeneration(ctx context.Context, branch string, n int, req agentapi.DetachRequest) (agentapi.DetachResponse, error) {
 	if !agentapi.ValidBranchName(branch) || n < 1 {
 		return agentapi.DetachResponse{}, fmt.Errorf("%w: branch %q, generation %d", ErrInvalid, branch, n)
@@ -160,10 +161,19 @@ func (v *Volume) DetachGeneration(ctx context.Context, branch string, n int, req
 	defer release()
 
 	src := v.genDir(branch, n)
-	if req.ToBranch != "" {
-		if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Lstat(src); errors.Is(err, fs.ErrNotExist) {
+		// data-n is gone: an earlier call may have moved it and its answer got lost.
+		if req.ToBranch != "" {
 			if _, err := v.currentGeneration(req.ToBranch); err == nil {
 				return agentapi.DetachResponse{Branch: req.ToBranch}, nil // done by an earlier call
+			}
+		} else {
+			rp, found, err := v.resetRestorePoint(branch, n)
+			if err != nil {
+				return agentapi.DetachResponse{}, err
+			}
+			if found {
+				return agentapi.DetachResponse{RestorePoint: &rp}, nil // done by an earlier call
 			}
 		}
 	}
@@ -250,12 +260,14 @@ func (v *Volume) detachToRestorePoint(branch string, n int) (agentapi.DetachResp
 	dir := v.restorePointDir(branch, id)
 	rp := agentapi.RestorePoint{
 		ID: id, Branch: branch, CreatedAt: now.UTC().Truncate(time.Second),
-		Reason: agentapi.ReasonReset, Label: "before reset (" + generationName(n) + ")",
+		Reason: agentapi.ReasonReset, Label: resetLabel(n),
 	}
 	// Record first, then move: if the agent stops in between, Recover drops the entry whose
 	// directory is missing and the generation is still in its branch. The other order would
-	// leave a finished directory the catalog does not list, which Recover removes.
-	if err := v.addRestorePoint(cat, rp, dir); err != nil {
+	// leave a finished directory the catalog does not list, which Recover removes. Retention
+	// waits for the move.
+	cat.RestorePoints = append(cat.RestorePoints, catalogEntry{RestorePoint: rp, Path: v.rel(dir)})
+	if err := saveCatalog(v.catalogPath(), cat); err != nil {
 		return agentapi.DetachResponse{}, err
 	}
 	if err := os.Rename(v.genDir(branch, n), dir); err != nil {
@@ -268,7 +280,43 @@ func (v *Volume) detachToRestorePoint(branch string, n int) (agentapi.DetachResp
 	if err := syncDir(v.branchDir(branch)); err != nil {
 		return agentapi.DetachResponse{}, err
 	}
+	// Retention runs only after the move, so a failed or interrupted move never costs an older
+	// restore point; if it fails here, the hourly pass applies it.
+	if gone := v.retain(&cat, branch); len(gone) > 0 {
+		if err := saveCatalog(v.catalogPath(), cat); err != nil {
+			slog.Warn("restore point retention after a reset", "branch", branch, "err", err)
+		} else {
+			for _, d := range gone {
+				v.trashOrWarn(d)
+			}
+		}
+	}
 	return agentapi.DetachResponse{RestorePoint: &rp}, nil
+}
+
+// resetLabel is the label of the restore point a reset makes of the branch's data-n.
+func resetLabel(n int) string { return "before reset (" + generationName(n) + ")" }
+
+// resetRestorePoint finds the restore point an earlier reset made of the branch's data-n: the
+// newest entry with reason "reset" and that generation's label.
+func (v *Volume) resetRestorePoint(branch string, n int) (agentapi.RestorePoint, bool, error) {
+	cat, err := loadCatalog(v.catalogPath())
+	if err != nil {
+		return agentapi.RestorePoint{}, false, err
+	}
+	var found *agentapi.RestorePoint
+	for _, e := range cat.RestorePoints {
+		if e.Branch == branch && e.Reason == agentapi.ReasonReset && e.Label == resetLabel(n) {
+			if found == nil || e.CreatedAt.After(found.CreatedAt) {
+				rp := e.RestorePoint
+				found = &rp
+			}
+		}
+	}
+	if found == nil {
+		return agentapi.RestorePoint{}, false, nil
+	}
+	return *found, true, nil
 }
 
 // forgetRestorePoint removes the entry id from the catalog again. A failure is only logged:

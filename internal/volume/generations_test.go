@@ -2,11 +2,13 @@ package volume_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"consonance/internal/agentapi"
 	"consonance/internal/supervisorapi"
@@ -280,6 +282,156 @@ func TestDetachAsRestorePointKeepsTheGenerationWhenTheMoveFails(t *testing.T) {
 	}
 	if list, err := v.ListRestorePoints("dev"); err != nil || len(list) != 0 {
 		t.Fatalf("restore points = %+v, %v; want none (the entry is removed again)", list, err)
+	}
+}
+
+// seedRestorePoints writes a catalog of n "api" restore points of the branch, one every three
+// minutes back from the clock, and returns their IDs, newest first.
+func seedRestorePoints(t *testing.T, root, branch string, clock *testClock, n int) []string {
+	t.Helper()
+	var fixtures []rpFixture
+	var ids []string
+	for i := range n {
+		at := clock.Now().Add(-time.Duration(3*(i+1)) * time.Minute)
+		id := fmt.Sprintf("rp-%s-a%03d", at.Format("20060102T150405Z"), i)
+		fixtures = append(fixtures, rpFixture{id: id, branch: branch, reason: "api", createdAt: at})
+		ids = append(ids, id)
+	}
+	writeCatalog(t, root, fixtures...)
+	return ids
+}
+
+// restorePointIDs returns the IDs of the branch's restore points, sorted.
+func restorePointIDs(t *testing.T, v *volume.Volume, branch string) []string {
+	t.Helper()
+	list, err := v.ListRestorePoints(branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, rp := range list {
+		ids = append(ids, rp.ID)
+	}
+	slices.Sort(ids)
+	return ids
+}
+
+func TestDetachAsRestorePointKeepsOlderRestorePointsWhenTheMoveFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	const keep = 20
+	root := t.TempDir()
+	old := mkGeneration(t, root, "dev", 1, false)
+	mkGeneration(t, root, "dev", 2, true)
+	clock := newClock()
+	// dev holds as many restore points as the retention keeps: a 21st would push the oldest out.
+	seeded := seedRestorePoints(t, root, "dev", clock, keep)
+	rdir := filepath.Join(root, "restore", "dev")
+	if err := os.Chmod(rdir, 0o500); err != nil { // nothing can be moved in
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(rdir, 0o700) })
+	v := openVolume(t, root, supervisors{"dev": {statuses: []supervisorapi.Status{running("data-2")}}}, func(c *volume.Config) {
+		c.Now = clock.Now
+		c.RestorePointsPerBranch = keep
+	})
+	if _, err := v.DetachGeneration(testCtx(t), "dev", 1, agentapi.DetachRequest{AsRestorePoint: true}); err == nil {
+		t.Fatal("DetachGeneration succeeded although the move failed")
+	}
+	if !exists(filepath.Join(old, "PG_VERSION")) {
+		t.Fatal("the generation left its branch")
+	}
+	if got, want := restorePointIDs(t, v, "dev"), slices.Sorted(slices.Values(seeded)); !slices.Equal(got, want) {
+		t.Fatalf("restore points = %v; want the %d that were there: a detach that did not happen must not push one out", got, keep)
+	}
+}
+
+func TestDetachAsRestorePointAppliesRetentionAfterTheMove(t *testing.T) {
+	const keep = 20
+	root := t.TempDir()
+	mkGeneration(t, root, "dev", 1, false)
+	mkGeneration(t, root, "dev", 2, true)
+	clock := newClock()
+	seeded := seedRestorePoints(t, root, "dev", clock, keep)
+	v := openVolume(t, root, supervisors{"dev": {statuses: []supervisorapi.Status{running("data-2")}}}, func(c *volume.Config) {
+		c.Now = clock.Now
+		c.RestorePointsPerBranch = keep
+	})
+	got, err := v.DetachGeneration(testCtx(t), "dev", 1, agentapi.DetachRequest{AsRestorePoint: true})
+	if err != nil || got.RestorePoint == nil {
+		t.Fatalf("DetachGeneration = %+v, %v", got, err)
+	}
+	// The reset is the 21st restore point: the oldest goes, the rest and the reset stay.
+	oldest := seeded[keep-1]
+	want := slices.Sorted(slices.Values(append(slices.Clone(seeded[:keep-1]), got.RestorePoint.ID)))
+	if ids := restorePointIDs(t, v, "dev"); !slices.Equal(ids, want) {
+		t.Fatalf("restore points = %v, want the reset's and the %d newest older ones", ids, keep-1)
+	}
+	if exists(filepath.Join(root, "restore", "dev", oldest)) {
+		t.Fatal("the oldest restore point's directory was kept")
+	}
+	if !exists(filepath.Join(root, "restore", "dev", got.RestorePoint.ID, "PG_VERSION")) {
+		t.Fatal("the generation was not moved into the restore point")
+	}
+}
+
+func TestDetachAsRestorePointIsSafeToRetry(t *testing.T) {
+	root := t.TempDir()
+	mkGeneration(t, root, "dev", 1, false)
+	mkGeneration(t, root, "dev", 2, true)
+	v := openVolume(t, root, supervisors{"dev": {statuses: []supervisorapi.Status{running("data-2")}}}, nil)
+	ctx := testCtx(t)
+	req := agentapi.DetachRequest{AsRestorePoint: true}
+	first, err := v.DetachGeneration(ctx, "dev", 1, req)
+	if err != nil || first.RestorePoint == nil {
+		t.Fatalf("DetachGeneration = %+v, %v", first, err)
+	}
+	// The response was lost and the operator asks again: the same restore point comes back.
+	again, err := v.DetachGeneration(ctx, "dev", 1, req)
+	if err != nil || again.RestorePoint == nil || again.RestorePoint.ID != first.RestorePoint.ID {
+		t.Fatalf("retried DetachGeneration = %+v, %v; want restore point %s", again, err, first.RestorePoint.ID)
+	}
+	if list, err := v.ListRestorePoints("dev"); err != nil || len(list) != 1 {
+		t.Fatalf("restore points = %+v, %v; want exactly one", list, err)
+	}
+	// Only a generation that was reset is answered: another number is still not found.
+	if _, err := v.DetachGeneration(ctx, "dev", 3, req); !errors.Is(err, volume.ErrNotFound) {
+		t.Fatalf("a generation that never existed: %v, want ErrNotFound", err)
+	}
+}
+
+func TestDetachAsRestorePointRetryAnswersOnlyForItsOwnReset(t *testing.T) {
+	root := t.TempDir()
+	mkGeneration(t, root, "main", 1, false)
+	mkGeneration(t, root, "main", 2, true)
+	mkGeneration(t, root, "dev", 2, true) // dev never had a data-1
+	clock := newClock()
+	sups := supervisors{
+		"main": {statuses: []supervisorapi.Status{running("data-2")}},
+		"dev":  {statuses: []supervisorapi.Status{running("data-2")}},
+	}
+	v := openVolume(t, root, sups, func(c *volume.Config) { c.Now = clock.Now })
+	ctx := testCtx(t)
+	req := agentapi.DetachRequest{AsRestorePoint: true}
+	first, err := v.DetachGeneration(ctx, "main", 1, req)
+	if err != nil || first.RestorePoint == nil {
+		t.Fatalf("DetachGeneration(main) = %+v, %v", first, err)
+	}
+	// main's restore point has the label a reset of dev's data-1 would have, but it is main's.
+	if _, err := v.DetachGeneration(ctx, "dev", 1, req); !errors.Is(err, volume.ErrNotFound) {
+		t.Fatalf("dev's data-1 was never reset: %v, want ErrNotFound", err)
+	}
+	// A generation number can come back once its directory was moved away; a retry then
+	// belongs to the newest reset of it.
+	clock.Advance(time.Minute)
+	mkGeneration(t, root, "main", 1, false)
+	second, err := v.DetachGeneration(ctx, "main", 1, req)
+	if err != nil || second.RestorePoint == nil || second.RestorePoint.ID == first.RestorePoint.ID {
+		t.Fatalf("second DetachGeneration(main) = %+v, %v", second, err)
+	}
+	if again, err := v.DetachGeneration(ctx, "main", 1, req); err != nil || again.RestorePoint == nil || again.RestorePoint.ID != second.RestorePoint.ID {
+		t.Fatalf("retried DetachGeneration = %+v, %v; want the newest restore point %s", again, err, second.RestorePoint.ID)
 	}
 }
 
