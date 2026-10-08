@@ -108,6 +108,42 @@ func TestCreateRestorePointNeedsRunningBranch(t *testing.T) {
 	}
 }
 
+func TestCreateRestorePointStopsOnADirectoryItCannotCheck(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	mkGeneration(t, root, "main", 1, true)
+	rdir := filepath.Join(root, "restore", "main")
+	if err := os.MkdirAll(rdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(rdir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(rdir, 0o700) })
+	v := openVolume(t, root, supervisors{"main": {statuses: []supervisorapi.Status{running("data-1")}}}, nil)
+	ctx := testCtx(t)
+	done := make(chan error, 1)
+	go func() {
+		_, err := v.CreateRestorePoint(ctx, "main", agentapi.CreateRestorePointRequest{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("CreateRestorePoint succeeded on a directory it cannot check")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CreateRestorePoint did not return")
+	}
+	release, err := v.AcquireForTest(ctx) // the operation lock is free again
+	if err != nil {
+		t.Fatalf("lock after the failure: %v", err)
+	}
+	release()
+}
+
 func TestListRestorePointsNewestFirst(t *testing.T) {
 	root := t.TempDir()
 	mkGeneration(t, root, "main", 1, true)

@@ -50,7 +50,10 @@ func (v *Volume) CreateRestorePoint(ctx context.Context, branch string, req agen
 		return agentapi.RestorePoint{}, err
 	}
 	now := v.cfg.Now()
-	id := v.unusedRestorePointID(cat, branch, now)
+	id, err := v.unusedRestorePointID(cat, branch, now)
+	if err != nil {
+		return agentapi.RestorePoint{}, err
+	}
 	if err := os.MkdirAll(v.restoreBranchDir(branch), 0o700); err != nil {
 		return agentapi.RestorePoint{}, err
 	}
@@ -93,15 +96,23 @@ func (v *Volume) addRestorePoint(cat catalog, rp agentapi.RestorePoint, dir stri
 	return nil
 }
 
-// unusedRestorePointID returns a new restore point ID that no catalog entry and no directory uses.
-func (v *Volume) unusedRestorePointID(cat catalog, branch string, now time.Time) string {
-	for {
+// unusedRestorePointID returns a new restore point ID that no catalog entry and no directory
+// uses. An error other than "does not exist" while checking for the directory is returned.
+func (v *Volume) unusedRestorePointID(cat catalog, branch string, now time.Time) (string, error) {
+	for range 10 {
 		id := newRestorePointID(now)
-		taken := slices.ContainsFunc(cat.RestorePoints, func(e catalogEntry) bool { return e.ID == id })
-		if _, err := os.Lstat(v.restorePointDir(branch, id)); !taken && errors.Is(err, fs.ErrNotExist) {
-			return id
+		if slices.ContainsFunc(cat.RestorePoints, func(e catalogEntry) bool { return e.ID == id }) {
+			continue
+		}
+		_, err := os.Lstat(v.restorePointDir(branch, id))
+		if errors.Is(err, fs.ErrNotExist) {
+			return id, nil
+		}
+		if err != nil {
+			return "", err
 		}
 	}
+	return "", errors.New("no unused restore point ID after 10 draws")
 }
 
 // retain drops the branch's restore points that the retention policy expires (spec 7.2) from
