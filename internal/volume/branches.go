@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 
 	"consonance/internal/agentapi"
+	"consonance/internal/supervisorapi"
 )
 
 // CreateBranchData makes the data of a new branch (spec 7.2 POST /v1/branches/{name}/data,
@@ -104,4 +106,54 @@ func (v *Volume) makeFirstGeneration(name string, fill func(dst string) (string,
 		return "", err
 	}
 	return lsn, nil
+}
+
+// DeleteBranchData removes a branch's directory and its restore points (spec 7.2, 9.6). The
+// operator deletes the branch's pod first; if its supervisor still answers, PostgreSQL must be
+// stopped. main cannot be deleted. A branch without data is deleted already: success.
+func (v *Volume) DeleteBranchData(ctx context.Context, name string) error {
+	if !agentapi.ValidBranchName(name) {
+		return fmt.Errorf("%w: branch name %q", ErrInvalid, name)
+	}
+	if name == agentapi.MainBranch {
+		return fmt.Errorf("%w: main cannot be deleted", ErrConflict)
+	}
+	release, err := v.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	st, err := v.status(ctx, name)
+	switch {
+	case errors.Is(err, ErrSupervisorUnavailable):
+		// No answer: the pod is gone, as it should be by now.
+	case err != nil:
+		return err
+	case st.PG != supervisorapi.PGStopped:
+		return fmt.Errorf("%w: branch %q is %s", ErrConflict, name, st.PG)
+	}
+	cat, err := loadCatalog(v.catalogPath())
+	if err != nil {
+		return err
+	}
+	kept := slices.DeleteFunc(slices.Clone(cat.RestorePoints), func(e catalogEntry) bool { return e.Branch == name })
+	if len(kept) != len(cat.RestorePoints) {
+		cat.RestorePoints = kept
+		if err := saveCatalog(v.catalogPath(), cat); err != nil {
+			return err
+		}
+	}
+	// Catalog first: if the agent stops right after it, Recover removes the restore point
+	// directories the catalog no longer lists, and the retried call removes the branch.
+	if err := v.trash(v.restoreBranchDir(name)); err != nil {
+		return err
+	}
+	if err := v.trash(v.branchDir(name)); err != nil {
+		return err
+	}
+	v.mu.Lock()
+	delete(v.lastCopy, name)
+	v.mu.Unlock()
+	return nil
 }
