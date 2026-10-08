@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 )
 
@@ -131,5 +132,132 @@ func TestWriteFileSyncReplaces(t *testing.T) {
 	}
 	if b, err := os.ReadFile(path); err != nil || string(b) != "second" {
 		t.Fatalf("file = %q, %v; want second", b, err)
+	}
+}
+
+func TestStateOf(t *testing.T) {
+	root := t.TempDir()
+
+	// Missing directory
+	st, err := stateOf(filepath.Join(root, "missing"))
+	if err != nil || st != dirMissing {
+		t.Fatalf("missing dir: %v, %d; want nil, dirMissing", err, st)
+	}
+
+	// Marked directory
+	marked := filepath.Join(root, "marked")
+	if err := makeMarked(marked); err != nil {
+		t.Fatal(err)
+	}
+	st, err = stateOf(marked)
+	if err != nil || st != dirMarked {
+		t.Fatalf("marked dir: %v, %d; want nil, dirMarked", err, st)
+	}
+
+	// Complete directory
+	if err := finishMarked(marked); err != nil {
+		t.Fatal(err)
+	}
+	st, err = stateOf(marked)
+	if err != nil || st != dirComplete {
+		t.Fatalf("complete dir: %v, %d; want nil, dirComplete", err, st)
+	}
+
+	// Regular file (not directory)
+	file := filepath.Join(root, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err = stateOf(file)
+	if err == nil {
+		t.Fatal("file: want an error")
+	}
+	if st != 0 {
+		t.Fatalf("file: state = %d; want 0", st)
+	}
+
+	// Directory under a parent with mode 0o000
+	if os.Geteuid() == 0 {
+		t.Skip("skipping as root")
+	}
+	parent := filepath.Join(root, "locked_parent")
+	child := filepath.Join(parent, "child")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.Chmod(parent, 0o700)
+	})
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	st, err = stateOf(child)
+	if err == nil {
+		t.Fatal("inaccessible child: want an error")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatal("inaccessible child: error should not be ErrNotExist")
+	}
+}
+
+func TestCurrentGenerationReportsOtherErrors(t *testing.T) {
+	l := layout{root: t.TempDir()}
+	bd := l.branchDir("dev")
+	mustMkdirAll(t, bd)
+
+	// current as a real directory (not a link)
+	currentDir := filepath.Join(bd, "current")
+	if err := os.Mkdir(currentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := l.currentGeneration("dev")
+	if err == nil {
+		t.Fatal("current as directory: want an error")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatal("current as directory: error should not be ErrNotFound")
+	}
+
+	// Branch directory with mode 0o000
+	if os.Geteuid() == 0 {
+		t.Skip("skipping as root")
+	}
+	root := t.TempDir()
+	l2 := layout{root: root}
+	bd2 := l2.branchDir("dev2")
+	if err := os.MkdirAll(bd2, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.Chmod(bd2, 0o700)
+	})
+	if err := os.Chmod(bd2, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	_, err = l2.currentGeneration("dev2")
+	if err == nil {
+		t.Fatal("inaccessible branch dir: want an error")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatal("inaccessible branch dir: error should not be ErrNotFound")
+	}
+}
+
+func TestMakeMarkedLeavesNothingWhenTheMarkerFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("skipping as root")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "gen")
+
+	old := syscall.Umask(0o277)
+	defer syscall.Umask(old)
+
+	err := makeMarked(dir)
+	if err == nil {
+		t.Fatal("makeMarked: want an error")
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("directory after error: %v; want os.ErrNotExist", err)
 	}
 }

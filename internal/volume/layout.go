@@ -70,26 +70,67 @@ func parseGeneration(name string) (int, bool) {
 	return n, true
 }
 
-// complete reports whether dir is a directory without the .incomplete marker (spec 6).
-func complete(dir string) bool {
+// dirState is what is known for sure about a generation or restore point directory.
+type dirState int
+
+const (
+	dirMissing  dirState = iota // the directory does not exist
+	dirMarked                   // it exists and still holds the .incomplete marker
+	dirComplete                 // it exists without the marker
+)
+
+// stateOf reports dir's state. An error other than "does not exist" is returned as it is, so
+// that no caller deletes or re-creates data on a guess.
+func stateOf(dir string) (dirState, error) {
 	fi, err := os.Stat(dir)
-	if err != nil || !fi.IsDir() {
-		return false
+	if errors.Is(err, fs.ErrNotExist) {
+		return dirMissing, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !fi.IsDir() {
+		return 0, fmt.Errorf("%s is not a directory", dir)
 	}
 	_, err = os.Lstat(filepath.Join(dir, incompleteMarker))
-	return errors.Is(err, fs.ErrNotExist)
+	switch {
+	case err == nil:
+		return dirMarked, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return dirComplete, nil
+	default:
+		return 0, err
+	}
 }
 
-// currentGeneration returns the generation the branch's current link points at. A branch whose
-// link is missing or leads to no complete generation has no data: ErrNotFound.
+// complete reports whether dir is a directory without the .incomplete marker (spec 6).
+// An error counts as not complete; where a wrong answer could delete or re-create data, use stateOf.
+func complete(dir string) bool {
+	st, err := stateOf(dir)
+	return err == nil && st == dirComplete
+}
+
+// currentGeneration returns the generation the branch's current link points at. It is
+// ErrNotFound only when the branch certainly has no data: the link is missing, names no
+// generation, or leads to a missing or unfinished one. Any other error is returned as it is.
 func (l layout) currentGeneration(branch string) (int, error) {
 	target, err := os.Readlink(filepath.Join(l.branchDir(branch), currentLink))
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return 0, fmt.Errorf("%w: branch %q has no data", ErrNotFound, branch)
 	}
+	if err != nil {
+		return 0, fmt.Errorf("branch %q: read %s: %w", branch, currentLink, err)
+	}
 	n, ok := parseGeneration(target)
-	if !ok || !complete(l.genDir(branch, n)) {
-		return 0, fmt.Errorf("%w: branch %q: current points at %q, which is no complete generation", ErrNotFound, branch, target)
+	if !ok {
+		return 0, fmt.Errorf("%w: branch %q: current points at %q, which is no generation", ErrNotFound, branch, target)
+	}
+	st, err := stateOf(l.genDir(branch, n))
+	if err != nil {
+		return 0, fmt.Errorf("branch %q: %w", branch, err)
+	}
+	if st != dirComplete {
+		return 0, fmt.Errorf("%w: branch %q: current points at %q, which is missing or unfinished", ErrNotFound, branch, target)
 	}
 	return n, nil
 }
@@ -150,6 +191,7 @@ func makeMarked(dir string) error {
 	}
 	f, err := os.OpenFile(filepath.Join(dir, incompleteMarker), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
+		os.Remove(dir) // an unmarked directory would read as complete
 		return err
 	}
 	return f.Close()
