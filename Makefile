@@ -1,14 +1,17 @@
-.PHONY: test test-vm vm-setup image-postgres smoke-postgres
+.PHONY: test test-vm test-xfs vm-setup image-postgres smoke-postgres
 
-test: ## host tests (PostgreSQL tests skip)
+test: ## host tests (PostgreSQL and XFS tests skip)
 	go vet ./...
 	go test ./...
 
-vm-setup: ## one-time: start the Lima VM and install Go + PostgreSQL 17
+vm-setup: ## one-time: start the Lima VM, install Go and PostgreSQL 17, mount the XFS test volume
 	hack/vm-setup.sh
 
 test-vm: ## all tests inside the Lima VM
 	hack/vm-test.sh ./...
+
+test-xfs: ## internal/volume tests on XFS with reflink inside the Lima VM
+	hack/vm-test.sh -race ./internal/volume/... ./internal/testutil/xfstest/...
 
 image-postgres: ## build consonance/postgres:17-dev for the local architecture
 	docker build -f images/postgres/Dockerfile -t consonance/postgres:17-dev .
