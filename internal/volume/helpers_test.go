@@ -22,6 +22,7 @@ type fakeSupervisor struct {
 	startErr error                  // BackupStart fails with it when set
 	starts   int                    // BackupStart calls
 	stops    int                    // BackupStop calls
+	onStop   func()                 // called inside BackupStop when set
 }
 
 func (f *fakeSupervisor) Status(context.Context) (supervisorapi.Status, error) {
@@ -51,6 +52,9 @@ func (f *fakeSupervisor) BackupStop(context.Context) (supervisorapi.BackupStopRe
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stops++
+	if f.onStop != nil {
+		f.onStop()
+	}
 	return supervisorapi.BackupStopResponse{
 		LabelFile: "START WAL LOCATION: 0/2000028 (file 000000010000000000000002)\n",
 		StopLSN:   "0/2000100",

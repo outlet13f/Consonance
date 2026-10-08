@@ -19,7 +19,11 @@ func parentLatest(parent string) agentapi.CreateBranchDataRequest {
 }
 
 func TestCreateBranchFromRunningParent(t *testing.T) {
-	e := newPGEnv(t, nil)
+	clock := newClock()
+	e := newPGEnv(t, func(c *volume.Config) {
+		c.MinCopyInterval = time.Minute
+		c.Now = clock.Now
+	})
 	ctx := testCtx(t)
 	e.exec(t, "main", "CREATE TABLE t (id int); INSERT INTO t SELECT generate_series(1, 1000)")
 
@@ -29,6 +33,11 @@ func TestCreateBranchFromRunningParent(t *testing.T) {
 	}
 	if got.Generation != 1 || got.BackupStartLSN == "" {
 		t.Fatalf("got %+v", got)
+	}
+	// A successful copy counts for the interval too: main paid a checkpoint for it.
+	var rl *volume.RateLimitError
+	if _, err := e.vol.CreateBranchData(ctx, "dev2", parentLatest("main")); !errors.As(err, &rl) || rl.RetryAfter != time.Minute || rl.Source != "main" {
+		t.Fatalf("second copy = %v, want main limited for 1m", err)
 	}
 	data := filepath.Join(e.root, "branches", "dev", "data-1")
 	if target, err := os.Readlink(filepath.Join(e.root, "branches", "dev", "current")); err != nil || target != "data-1" {
@@ -110,6 +119,25 @@ func TestCreateBranchDataKeepsABranchItCannotRead(t *testing.T) {
 	}
 }
 
+func TestCreateBranchDataStopsAtAParentItCannotRead(t *testing.T) {
+	root := t.TempDir()
+	// main/current is a real directory, not a link: main's state cannot be judged. The parent
+	// reports stopped, so a copy that went on anyway would end in ErrNotRunning.
+	writeFile(t, filepath.Join(root, "branches", "main", "current", "keep"), "x", 0o600)
+	main := &fakeSupervisor{statuses: []supervisorapi.Status{stopped("data-1")}}
+	v := openVolume(t, root, supervisors{"main": main}, nil)
+	_, err := v.CreateBranchData(testCtx(t), "dev", parentLatest("main"))
+	if err == nil || errors.Is(err, volume.ErrNotFound) || errors.Is(err, volume.ErrNotRunning) {
+		t.Fatalf("CreateBranchData = %v, want an error that is neither ErrNotFound nor ErrNotRunning", err)
+	}
+	if starts, _ := main.calls(); starts != 0 {
+		t.Fatal("a backup was started on a parent that could not be read")
+	}
+	if exists(filepath.Join(root, "branches", "dev")) {
+		t.Fatal("branches/dev was made")
+	}
+}
+
 func TestCreateBranchDataNeedsRunningParent(t *testing.T) {
 	root := t.TempDir()
 	mkGeneration(t, root, "main", 1, true)
@@ -159,6 +187,7 @@ func TestFailedCopyEndsBackupAndCleansUp(t *testing.T) {
 	mkGeneration(t, root, "main", 1, true)
 	main := &fakeSupervisor{statuses: []supervisorapi.Status{running("data-1")}}
 	clock := newClock()
+	main.onStop = func() { clock.Advance(10 * time.Second) } // the copy takes 10s before its backup ends
 	v := openVolume(t, root, supervisors{"main": main}, func(c *volume.Config) {
 		c.MinCopyInterval = time.Minute
 		c.Now = clock.Now
@@ -172,10 +201,12 @@ func TestFailedCopyEndsBackupAndCleansUp(t *testing.T) {
 	if exists(filepath.Join(root, "branches", "dev")) {
 		t.Fatal("a partial branch was left behind")
 	}
-	// The failed copy still cost main a checkpoint, so it counts for the interval.
+	// The failed copy still cost main a checkpoint, so it counts for the interval. The interval
+	// runs from the end of the copy, which was 10s after its start: counted from the start, the
+	// limit would have only 50s left.
 	var rl *volume.RateLimitError
 	if _, err := v.CreateBranchData(testCtx(t), "dev", parentLatest("main")); !errors.As(err, &rl) || rl.RetryAfter != time.Minute {
-		t.Fatalf("second copy = %v, want a rate limit of 1m", err)
+		t.Fatalf("second copy = %v, want a rate limit of exactly 1m", err)
 	}
 }
 
