@@ -1,14 +1,17 @@
 package agent_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,7 +25,7 @@ const token = "test-token"
 
 func newServer(t *testing.T, ops *agenttest.FakeOps, tok string) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer((&agent.Server{Token: tok, Ops: ops}).Handler())
+	srv := httptest.NewServer((&agent.Server{Token: tok, Ops: ops, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}).Handler())
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -134,6 +137,7 @@ func TestErrorsMapToStatusAndCode(t *testing.T) {
 		{fmt.Errorf("%w: branch %q exists", volume.ErrConflict, "x"), 409, agentapi.CodeConflict},
 		{fmt.Errorf("%w: 91.0%% used", volume.ErrInsufficientStorage), 507, agentapi.CodeInsufficientStorage},
 		{fmt.Errorf("%w: status of branch %q", volume.ErrSupervisorUnavailable, "main"), 502, agentapi.CodeSupervisorUnavailable},
+		{fmt.Errorf("clone x: %w", volume.ErrReflinkUnsupported), 501, agentapi.CodeReflinkUnsupported},
 		{&volume.RateLimitError{Source: "main", RetryAfter: 1200 * time.Millisecond}, 429, agentapi.CodeRateLimited},
 		{errors.New("disk on fire"), 500, agentapi.CodeInternal},
 	} {
@@ -190,5 +194,66 @@ func TestRestorePointListIsNeverNull(t *testing.T) {
 	_, body := call(t, srv, "GET", "/v1/branches/main/restore-points", "", true)
 	if strings.TrimSpace(body) != `{"restorePoints":[]}` {
 		t.Fatalf("body = %s", body)
+	}
+}
+
+// lockedBuffer is a log sink the server goroutines and the test can share.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) lines() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s := strings.TrimSpace(l.b.String())
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, "\n")
+}
+
+func TestEachRequestIsLoggedOnce(t *testing.T) {
+	var logs lockedBuffer
+	ops := &agenttest.FakeOps{}
+	srv := httptest.NewServer((&agent.Server{Token: token, Ops: ops, Log: slog.New(slog.NewJSONHandler(&logs, nil))}).Handler())
+	t.Cleanup(srv.Close)
+
+	ops.SetErr(fmt.Errorf("%w (waited 2s)", volume.ErrBusy))
+	call(t, srv, "POST", "/v1/branches/dev/data", `{"parent":"main","source":{"type":"ParentLatest"}}`, true)
+	ops.SetErr(nil)
+	call(t, srv, "GET", "/v1/branches/main/generations", "", true)
+	call(t, srv, "GET", "/healthz", "", false)
+
+	var lines []string
+	deadline := time.Now().Add(2 * time.Second)
+	for lines = logs.lines(); len(lines) < 2 && time.Now().Before(deadline); lines = logs.lines() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("got %d log lines, want 2 (one per API request, none for /healthz):\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	var failed, ok map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &failed); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &ok); err != nil {
+		t.Fatal(err)
+	}
+	if failed["msg"] != "request" || failed["op"] != "POST /v1/branches/{name}/data" || failed["branch"] != "dev" ||
+		failed["status"] != float64(409) || !strings.Contains(fmt.Sprint(failed["err"]), "another volume operation is in progress") {
+		t.Errorf("failed request logged as %v", failed)
+	}
+	if ok["op"] != "GET /v1/branches/{name}/generations" || ok["branch"] != "main" || ok["status"] != float64(200) {
+		t.Errorf("request logged as %v", ok)
+	}
+	if _, has := ok["err"]; has {
+		t.Errorf("a successful request logged an error: %v", ok)
 	}
 }

@@ -35,10 +35,18 @@ type Ops interface {
 }
 
 // Server serves the agent API. Every route but /healthz needs the token; an empty Token lets
-// nobody in.
+// nobody in. Log gets one line per request; nil means slog.Default() at the time of the request.
 type Server struct {
 	Token string
 	Ops   Ops
+	Log   *slog.Logger
+}
+
+func (s *Server) logger() *slog.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	return slog.Default()
 }
 
 // maxBody bounds request bodies.
@@ -61,11 +69,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/branches/{name}/generations/{n}/activate", s.auth(s.activateGeneration))
 	mux.Handle("POST /v1/branches/{name}/generations/{n}/detach", s.auth(s.detachGeneration))
 	mux.Handle("DELETE /v1/branches/{name}/generations/{n}", s.auth(s.deleteGeneration))
-	return logRequests(mux)
+	return s.logRequests(mux)
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rec, ok := w.(*statusRecorder); ok { // r is the routed request here
+			rec.op, rec.branch = r.Pattern, r.PathValue("name")
+		}
 		got := r.Header.Get(agentapi.TokenHeader)
 		if s.Token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
 			writeError(w, http.StatusUnauthorized, agentapi.CodeUnauthorized, "invalid token")
@@ -207,6 +218,9 @@ func replyNoContent(w http.ResponseWriter, err error) {
 
 // writeOpError maps a volume error to its status code and error code.
 func writeOpError(w http.ResponseWriter, err error) {
+	if rec, ok := w.(*statusRecorder); ok {
+		rec.err = err
+	}
 	var rl *volume.RateLimitError
 	switch {
 	case errors.As(err, &rl):
@@ -227,8 +241,9 @@ func writeOpError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusInsufficientStorage, agentapi.CodeInsufficientStorage, err.Error())
 	case errors.Is(err, volume.ErrSupervisorUnavailable):
 		writeError(w, http.StatusBadGateway, agentapi.CodeSupervisorUnavailable, err.Error())
+	case errors.Is(err, volume.ErrReflinkUnsupported):
+		writeError(w, http.StatusNotImplemented, agentapi.CodeReflinkUnsupported, err.Error())
 	default:
-		slog.Error("volume operation failed", "err", err)
 		writeError(w, http.StatusInternalServerError, agentapi.CodeInternal, err.Error())
 	}
 }
@@ -243,8 +258,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// logRequests logs every API request with its route, branch, status and duration (spec 11).
-func logRequests(next http.Handler) http.Handler {
+// logRequests logs one line per API request with its route, branch, status, duration and, for
+// a failed volume operation, the error (spec 11). 5xx lines are logged at level Error.
+func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -252,15 +268,23 @@ func logRequests(next http.Handler) http.Handler {
 		if r.URL.Path == "/healthz" {
 			return
 		}
-		// The mux sets the matched pattern and path values on r while routing.
-		slog.Info("request", "op", r.Pattern, "branch", r.PathValue("name"),
-			"status", rec.status, "durationMs", time.Since(start).Milliseconds())
+		level := slog.LevelInfo
+		if rec.status >= http.StatusInternalServerError {
+			level = slog.LevelError
+		}
+		attrs := []any{"op", rec.op, "branch", rec.branch, "status", rec.status, "durationMs", time.Since(start).Milliseconds()}
+		if rec.err != nil {
+			attrs = append(attrs, "err", rec.err.Error())
+		}
+		s.logger().Log(r.Context(), level, "request", attrs...)
 	})
 }
 
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status     int
+	op, branch string
+	err        error
 }
 
 func (s *statusRecorder) WriteHeader(code int) {

@@ -144,6 +144,7 @@ const (
 	CodeRateLimited           ErrorCode = "rate-limited"           // 429, with Retry-After
 	CodeSupervisorUnavailable ErrorCode = "supervisor-unavailable" // 502
 	CodeInsufficientStorage   ErrorCode = "insufficient-storage"   // 507
+	CodeReflinkUnsupported    ErrorCode = "reflink-unsupported"    // 501: the volume cannot make reflink copies
 	CodeInternal              ErrorCode = "internal"               // 500
 )
 
