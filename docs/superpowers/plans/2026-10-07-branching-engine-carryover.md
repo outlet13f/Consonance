@@ -61,19 +61,20 @@ pgctl 부트스트랩:
 ### 계획 3(CRD·오퍼레이터)이 반영할 것
 
 - 브랜치 Service `br-<이름>`은 5432와 함께 감독 프로세스 포트 8008을 노출한다. 에이전트는 `http://br-<브랜치>:8008`로 감독 프로세스를 부른다(`--supervisor-url`).
-- 에이전트 파드 인자는 Project spec에서 온다: `--min-copy-interval`(`limits.minCopyInterval`), `--restore-points-per-branch`·`--restore-point-max-age`(`restorePoints`), `--project-id`. 값을 바꾸면 에이전트 파드를 다시 띄워야 반영된다. 볼륨은 `/volume`, 토큰은 Secret `internal-token`을 `/etc/consonance/token`에 마운트한다.
+- 에이전트 파드 인자는 Project spec에서 온다: `--min-copy-interval`(`limits.minCopyInterval`), `--restore-points-per-branch`·`--restore-point-max-age`(`restorePoints`), `--project-id`. 값을 바꾸면 에이전트 파드를 다시 띄워야 반영된다. 볼륨은 `/volume`, 토큰은 Secret `internal-token`(키 `token`)을 `/etc/consonance/token`에 마운트한다(에이전트는 `/etc/consonance/token/token`을 읽는다).
 - main 파드는 init-main이 성공한 뒤에 만든다. 그 전에 뜬 감독 프로세스는 `/v1/start`에 500(`data directory does not resolve`)을 돌려준다.
 - 에이전트 오류 코드에 따라 다르게 한다: `busy`·`supervisor-unavailable`·500은 지수 백오프로 재시도, `rate-limited`는 `Retry-After` 뒤 재시도, `not-running`은 부모가 실행 중이 아님(API 409), `conflict`는 상태 문제라 그대로 재시도하지 않는다. `reflink-unsupported`(501)·`insufficient-storage`(507)와 브랜치 데이터 생성의 `not-found`(부모에 데이터 없음)는 영구 오류다(스펙 10장: phase Failed, 재시도하지 않는다). 복사 도중 원본 브랜치를 정지하면 그 뒤 최대 30초 동안 `busy`가 올 수 있다.
-- 재시도해도 안전한 호출: `CreateBranchData`(데이터가 있으면 그 세대와 빈 LSN), `InitMain`, `DetachGeneration`(이미 옮겼으면 롤백은 toBranch를, 리셋은 그때 만든 복구 지점을 돌려준다), `DeleteBranchData`(없으면 성공). 그래서 `DetachGeneration`의 404는 옮길 세대가 없다는 뜻이다. 롤백·리셋 도중 오퍼레이터가 재시작하면 `ListGenerations`로 남은 세대를 확인하고, 현재 세대가 아닌 남은 세대는 `DeleteGeneration`으로 치운 뒤 다시 만든다.
-- `ActivateGeneration`은 감독 프로세스가 `stopped`를 보일 때만, `DetachGeneration`·`DeleteGeneration`은 PostgreSQL이 그 세대를 쓰지 않을 때만 성공한다(아니면 409).
+- 재시도해도 안전한 호출: `CreateBranchData`(데이터가 있으면 그 세대와 빈 LSN), `InitMain`, `DetachGeneration`(이미 옮겼으면 롤백은 toBranch를, 리셋은 그때 만든 복구 지점을 돌려준다), `DeleteBranchData`(없으면 성공). 그래서 `DetachGeneration`의 404는 옮길 세대가 없다는 뜻이다. Preparing 단계에서 오퍼레이터가 재시작하면 `ListGenerations`로 남은 세대를 확인해, 현재 세대보다 번호가 큰 세대(활성화하지 못한 앞 시도의 결과)만 `DeleteGeneration`으로 치운 뒤 다시 만든다. 새 세대는 언제나 있는 세대들보다 큰 번호를 받는다. 현재 세대보다 번호가 작은 세대는 사용자의 롤백·리셋 전 데이터일 수 있으므로 지우지 않는다.
+- `ActivateGeneration`은 감독 프로세스가 `stopped`를 보일 때만 `current`를 바꾼다(다른 상태면 409, 감독 프로세스가 응답하지 않으면 502 `supervisor-unavailable`). n이 이미 현재 세대면 감독 프로세스에 묻지 않고 성공하므로 다시 불러도 안전하다. `DetachGeneration`·`DeleteGeneration`은 n이 현재 세대이거나 PostgreSQL이 그 세대를 쓰고 있으면 409, 감독 프로세스가 응답하지 않으면 502다.
 - 스펙 11장의 메트릭은 에이전트에 아직 없다(계획 5).
 - 브랜치 데이터 삭제(`DeleteBranchData`)는 브랜치 파드 객체가 사라진 뒤에 부른다. 삭제를 요청한 것만으로는 부족하다. 에이전트는 감독 프로세스가 응답하지 않으면 파드가 없다고 보고 지운다.
 - 롤백의 Detaching 단계는 기존 세대를 백업 브랜치로 옮긴 뒤에 백업 Branch CR을 만든다. CR을 먼저 만들면 그 Branch의 조정이 `CreateBranchData`로 데이터를 먼저 만들어, 옮길 자리가 이미 차 있게 된다(`conflict`).
 - 스펙 11장 로그의 `requestId`는 계획 2에 만드는 곳이 없다. 오퍼레이터·API 서버가 만들어 에이전트에 넘기는 방법(예: 요청 헤더)을 정하고 에이전트 로그에 남긴다.
-- `agentclient.Client`는 `agent.Ops`를 구현하지 않는다(모든 메서드가 `ctx`를 받고 `Preflight`도 오류를 돌려준다). 쓰는 메서드만 모은 인터페이스를 쓰는 쪽에 둔다. 클라이언트는 리다이렉트를 따라가지 않아 3xx도 `APIError`이고, `Code`가 빈 `APIError`는 에이전트가 아닌 곳(프록시 등)의 응답이다.
+- `agentclient.Client`는 `agent.Ops`를 구현하지 않는다(모든 메서드가 `ctx`를 받고 `Preflight`도 오류를 돌려준다). 쓰는 메서드만 모은 인터페이스를 쓰는 쪽에 둔다. 클라이언트는 리다이렉트를 따라가지 않아 3xx도 `APIError`다. `Code`가 빈 `APIError`는 `{error, code}` 본문이 아닌 응답이다. 프록시 같은 중간 장치가 냈거나, 에이전트의 라우터가 직접 낸 301(경로에 `.`·`..` 조각)·404(없는 경로)·405(맞지 않는 메서드)다.
 - 에이전트 파드(`volume-agent`)의 `terminationGracePeriodSeconds`도 45초 이상으로 둔다. 에이전트는 SIGTERM을 받으면 진행 중인 요청을 최대 25초 기다린 뒤(그 안에 끝나지 않으면 종료 코드 1) 휴지통 비우기가 끝나기를 기다린다. 쿠버네티스 기본값 30초는 빠듯하다.
+- 에이전트 파드의 프로브는 토큰 없이 200을 돌려주는 `GET /healthz`를 쓴다. 에이전트는 기동 시 정리(`Recover`)를 마친 뒤에 요청을 받기 시작한다.
 
 ### 계획 4(REST API 서버)가 반영할 것
 
-- main 리셋은 공개 API가 막는다(스펙 8장 409 `conflict`). 에이전트는 main 삭제만 거부하고, main의 `ParentLatest` 세대 생성(리셋)은 받아들인다.
+- main 리셋은 공개 API가 막는다(스펙 5장 409 `conflict`). 에이전트는 main 삭제만 거부하고, main의 `ParentLatest` 세대 생성(리셋)은 받아들인다.
 - `agentclient` 사용 시 주의점은 계획 3 항목과 같다(`agent.Ops`를 구현하지 않음, 리다이렉트를 따라가지 않음, `Code`가 빈 `APIError`).
