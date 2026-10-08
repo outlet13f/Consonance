@@ -199,6 +199,10 @@ func TestSupervisorShutsDownWhileAutostartWaits(t *testing.T) {
 	if err := os.Chmod(fakePG, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Start refuses a data directory that does not exist; the fake postmaster needs nothing in it.
+	if err := os.Mkdir(filepath.Join(root, "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	logPath := filepath.Join(root, "supervisor.log")
 	logFile, err := os.Create(logPath)
 	if err != nil {

@@ -199,23 +199,31 @@ func TestUnrequestedExitIsLogged(t *testing.T) {
 	}
 }
 
-func TestStartFailsOnMissingDataDir(t *testing.T) {
-	bin := pgtest.BinDir(t)
-	m := pgctl.NewManager(filepath.Join(bin, "postgres"), pgctl.Options{
-		DataDir:        filepath.Join(t.TempDir(), "current"), // nothing there
-		SocketDir:      pgtest.SocketDir(t),
-		Port:           pgtest.FreePort(t),
+func TestStartRefusesUnresolvableDataDir(t *testing.T) {
+	dir := t.TempDir()
+	// A generation link that leads nowhere, as on a branch whose data is not made yet.
+	if err := os.Symlink("data-1", filepath.Join(dir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	// No postgres binary: Start must refuse before it launches anything.
+	m := pgctl.NewManager(filepath.Join(dir, "no-such-postgres"), pgctl.Options{
+		DataDir:        filepath.Join(dir, "current"),
+		SocketDir:      dir,
+		Port:           5432,
 		MaxConnections: 20,
 	})
 	err := m.Start(testCtx(t))
-	if err == nil {
-		t.Fatal("Start succeeded on a missing data directory")
+	if !errors.Is(err, pgctl.ErrNoDataDir) {
+		t.Fatalf("Start = %v, want ErrNoDataDir", err)
 	}
-	if !strings.Contains(err.Error(), "exited during startup") {
-		t.Fatalf("unexpected error: %v", err)
+	if !strings.Contains(err.Error(), filepath.Join(dir, "current")) {
+		t.Fatalf("error does not name the data directory: %v", err)
 	}
 	if s, _ := m.State(); s != pgctl.StateStopped {
 		t.Fatalf("state = %s, want stopped", s)
+	}
+	if g := m.Generation(); g != "" {
+		t.Fatalf("Generation = %q, want empty", g)
 	}
 }
 

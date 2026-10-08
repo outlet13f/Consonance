@@ -32,6 +32,10 @@ var ErrBusy = errors.New("postgres is starting or stopping")
 // now points to another generation than the one postgres was started on.
 var ErrGenerationMismatch = errors.New("postgres runs a different generation than the data directory points to")
 
+// ErrNoDataDir is returned by Start when the data directory (the generation link) does not
+// lead to a directory, so there is no generation to start.
+var ErrNoDataDir = errors.New("data directory does not resolve")
+
 // Manager runs one postmaster as a child process.
 type Manager struct {
 	postgresBin string
@@ -147,12 +151,14 @@ func (m *Manager) Start(ctx context.Context) error {
 	// Start postgres on the directory the link points to now, not through the link: for as long
 	// as it runs, postgres opens some files (pg_control) by their path under its data directory,
 	// so given the link, a switch made while it runs would send those writes into the other
-	// generation. When the link does not resolve, postgres gets it as is and reports the error.
+	// generation. A link that leads nowhere is refused rather than handed to postgres.
 	dir := resolveDir(m.opts.DataDir)
-	opts := m.opts
-	if dir != "" {
-		opts.DataDir = dir
+	if dir == "" {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrNoDataDir, m.opts.DataDir)
 	}
+	opts := m.opts
+	opts.DataDir = dir
 	cmd := exec.Command(m.postgresBin, Args(opts)...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
