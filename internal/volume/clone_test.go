@@ -136,3 +136,76 @@ func TestCloneTreeWithoutReflinkFails(t *testing.T) {
 		t.Fatalf("CloneTree = %v, want ErrReflinkUnsupported", err)
 	}
 }
+
+func TestCloneTreeFollowsALinkedSource(t *testing.T) {
+	root := xfstest.Dir(t)
+	src := filepath.Join(root, "src")
+	writeFile(t, filepath.Join(src, "file.txt"), "content", 0o600)
+	writeFile(t, filepath.Join(src, "nested", "deep", "file2.txt"), "nested content", 0o600)
+
+	link := filepath.Join(root, "src-link")
+	if err := os.Symlink(src, link); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(root, "dst")
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := volume.CloneTree(link, dst, nil); err != nil {
+		t.Fatalf("CloneTree(link): %v", err)
+	}
+
+	if got := readFile(t, filepath.Join(dst, "file.txt")); got != "content" {
+		t.Errorf("file.txt = %q", got)
+	}
+	if got := readFile(t, filepath.Join(dst, "nested", "deep", "file2.txt")); got != "nested content" {
+		t.Errorf("nested/deep/file2.txt = %q", got)
+	}
+}
+
+func TestCloneTreeToleratesEntriesDeletedDuringTheWalk(t *testing.T) {
+	src := t.TempDir()
+	if err := os.Mkdir(filepath.Join(src, "a"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(src, "z"), "z content", 0o600)
+	writeFile(t, filepath.Join(src, "zdir", "inner", "f"), "nested", 0o600)
+
+	dst := t.TempDir()
+
+	skip := func(rel string) bool {
+		if rel == "a" {
+			// Delete z and zdir while the walker is running; the root entries were already listed
+			os.Remove(filepath.Join(src, "z"))
+			os.RemoveAll(filepath.Join(src, "zdir"))
+		}
+		return false
+	}
+
+	err := volume.CloneTree(src, dst, skip)
+	if err != nil {
+		t.Fatalf("CloneTree: %v", err)
+	}
+
+	// Only "a" should be in dst
+	entries, err := os.ReadDir(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "a" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("dst entries = %v, want [a]", names)
+	}
+	// "a" is a directory, so verify it exists
+	aInfo, err := os.Stat(filepath.Join(dst, "a"))
+	if err != nil {
+		t.Errorf("Stat(a): %v", err)
+	} else if !aInfo.IsDir() {
+		t.Error("a is not a directory")
+	}
+}

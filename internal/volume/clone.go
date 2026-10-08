@@ -19,9 +19,14 @@ type SkipFunc func(rel string) bool
 // the source until either side writes. Directories and symlinks are re-created, permission bits
 // are kept, and dst gets src's. Entries that disappear while the tree is walked are left out: a
 // running PostgreSQL deletes files during a backup, and WAL replay accounts for that. Other file
-// types are an error. src and dst must be on one filesystem that supports reflink; otherwise
-// the error wraps ErrReflinkUnsupported.
+// types are an error. src may be a symlink to a directory; it is resolved first. src and dst must
+// be on one filesystem that supports reflink; otherwise the error wraps ErrReflinkUnsupported.
 func CloneTree(src, dst string, skip SkipFunc) error {
+	var err error
+	src, err = filepath.EvalSymlinks(src)
+	if err != nil {
+		return err
+	}
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
