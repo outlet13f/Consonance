@@ -12,11 +12,13 @@ import (
 // serving requests. It trashes generation and restore point directories still marked
 // .incomplete, current.tmp links, branch directories whose current link is missing or leads
 // nowhere (a branch whose creation did not finish), restore point directories the catalog does
-// not list and preflight leftovers, and drops catalog entries whose directory is gone. Complete
-// data is not touched. It deletes only on certain evidence (a marker, a missing or dangling link,
-// a missing directory); any other error stops it, so the agent fails to start rather than delete
-// data on a guess. It returns what it removed, relative to the volume root; a dropped catalog
-// entry appears as "catalog:<id>".
+// not list and preflight leftovers, and drops catalog entries whose directory is gone. Data the
+// volume still accounts for — a branch's linked generations and the restore points its catalog
+// lists — is never touched; without a catalog file, only restore point directories still marked
+// .incomplete are removed. It deletes only on certain evidence (a marker, a missing or dangling
+// link, a missing directory); any other error stops it, so the agent fails to start rather than
+// delete data on a guess. It returns what it removed, relative to the volume root; a dropped
+// catalog entry appears as "catalog:<id>".
 func (v *Volume) Recover() ([]string, error) {
 	var removed []string
 	drop := func(path string) error {
@@ -82,6 +84,11 @@ func (v *Volume) Recover() ([]string, error) {
 		}
 	}
 
+	_, err = os.Stat(v.catalogPath())
+	haveCatalog := err == nil
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return removed, err
+	}
 	cat, err := loadCatalog(v.catalogPath())
 	if err != nil {
 		return removed, err
@@ -121,10 +128,23 @@ func (v *Volume) Recover() ([]string, error) {
 			return removed, err
 		}
 		for _, rp := range rps {
-			if dir := filepath.Join(rbd, rp.Name()); !listed[dir] {
-				if err := drop(dir); err != nil {
-					return removed, err
+			dir := filepath.Join(rbd, rp.Name())
+			if listed[dir] {
+				continue
+			}
+			if !haveCatalog && rp.IsDir() {
+				// The catalog file is lost or was never written, so nothing says that a finished
+				// restore point is abandoned: only the unfinished ones go.
+				st, err := stateOf(dir)
+				if err != nil {
+					return removed, err // never delete on a guess
 				}
+				if st != dirMarked {
+					continue
+				}
+			}
+			if err := drop(dir); err != nil {
+				return removed, err
 			}
 		}
 		_ = os.Remove(rbd) // succeeds only when nothing is left in it

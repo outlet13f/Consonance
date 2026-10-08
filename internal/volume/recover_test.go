@@ -82,32 +82,41 @@ func TestRecoverRemovesLeftovers(t *testing.T) {
 	}
 }
 
-func TestRecoverStopsAtWhatItCannotJudge(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
+func TestRecoverStopsOnACurrentItCannotRead(t *testing.T) {
 	root := t.TempDir()
-	gen := mkGeneration(t, root, "main", 1, true)
-	// The generation stats fine, but whether it holds the marker cannot be checked.
-	if err := os.Chmod(gen, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(gen, 0o700) })
+	gen := mkGeneration(t, root, "main", 1, false)
+	// current is a regular file: reading the link fails with EINVAL, which proves nothing.
+	writeFile(t, filepath.Join(root, "branches", "main", "current"), "data-1", 0o600)
 	v := openVolume(t, root, nil, nil)
 	if _, err := v.Recover(); err == nil {
-		t.Fatal("Recover went on past an error it cannot judge")
+		t.Fatal("Recover went on past a current link it could not read")
 	}
-	if err := os.Chmod(gen, 0o700); err != nil {
-		t.Fatal(err)
+	if !exists(filepath.Join(gen, "PG_VERSION")) || !exists(filepath.Join(root, "branches", "main", "current")) {
+		t.Fatal("Recover removed main though it could not judge it")
 	}
-	if !exists(filepath.Join(gen, "PG_VERSION")) {
-		t.Fatal("Recover removed a generation it could not read")
+}
+
+func TestRecoverWithoutACatalogKeepsFinishedRestorePoints(t *testing.T) {
+	root := t.TempDir()
+	mkGeneration(t, root, "main", 1, true)
+	writeFile(t, filepath.Join(root, "restore", "main", "rp-20261007T031500Z-ab12", "PG_VERSION"), "17\n", 0o600)
+	writeFile(t, filepath.Join(root, "restore", "main", "rp-20261007T031600Z-cd34", ".incomplete"), "", 0o600)
+	v := openVolume(t, root, nil, nil) // no catalog.json was ever written
+	removed, err := v.Recover()
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if !slices.Equal(removed, []string{"restore/main/rp-20261007T031600Z-cd34"}) {
+		t.Fatalf("removed %q, want only the unfinished restore point", removed)
+	}
+	if !exists(filepath.Join(root, "restore", "main", "rp-20261007T031500Z-ab12", "PG_VERSION")) {
+		t.Fatal("a finished restore point was removed although no catalog said it was abandoned")
 	}
 }
 
 // A directory that can be renamed but not searched (mode 0200) is the case where a guess would
 // really delete data: Recover cannot see whether the marker is there, and trashing the directory
-// would succeed. With mode 0000 the rename fails by itself, so the test above cannot tell.
+// would succeed. (With mode 0000 the rename fails by itself, which would hide the guess.)
 func TestRecoverKeepsWhatItCannotInspect(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores directory permissions")
@@ -143,5 +152,30 @@ func TestRecoverKeepsWhatItCannotInspect(t *testing.T) {
 				t.Fatal("Recover removed what it could not inspect")
 			}
 		})
+	}
+}
+
+// Without a catalog Recover looks at each restore point directory itself, and one it cannot
+// inspect stops it like anywhere else (mode 0200, see TestRecoverKeepsWhatItCannotInspect).
+func TestRecoverWithoutACatalogStopsAtARestorePointItCannotInspect(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "restore", "main", "rp-20261007T031500Z-ab12")
+	writeFile(t, filepath.Join(dir, "PG_VERSION"), "17\n", 0o600)
+	if err := os.Chmod(dir, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	v := openVolume(t, root, nil, nil) // no catalog.json was ever written
+	if removed, err := v.Recover(); err == nil {
+		t.Fatalf("Recover went on past a restore point it cannot inspect, removing %q", removed)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(filepath.Join(dir, "PG_VERSION")) {
+		t.Fatal("Recover removed what it could not inspect")
 	}
 }
