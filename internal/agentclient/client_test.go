@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -124,8 +125,12 @@ func TestClientErrors(t *testing.T) {
 		t.Fatalf("rate limited: %#v", err)
 	}
 	ops.SetErr(fmt.Errorf("%w (waited 2s)", volume.ErrBusy))
-	if code := agentclient.CodeOf(c.DeleteBranchData(ctx, "dev")); code != agentapi.CodeBusy {
+	err = c.DeleteBranchData(ctx, "dev")
+	if code := agentclient.CodeOf(err); code != agentapi.CodeBusy {
 		t.Fatalf("busy: code %q", code)
+	}
+	if prefix := "agent: 409 " + string(agentapi.CodeBusy) + ": "; !strings.HasPrefix(err.Error(), prefix) {
+		t.Fatalf("busy: Error() = %q, want prefix %q", err.Error(), prefix)
 	}
 	ops.SetErr(nil)
 	if code := agentclient.CodeOf(agentclient.New(url, "wrong", nil).DeleteBranchData(ctx, "dev")); code != agentapi.CodeUnauthorized {
@@ -145,5 +150,33 @@ func TestClientReadsForeignErrorBodies(t *testing.T) {
 	var apiErr *agentclient.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadGateway || apiErr.Code != "" || apiErr.Message != "upstream connect error" {
 		t.Fatalf("got %#v", err)
+	}
+	if got, want := err.Error(), "agent: 502: upstream connect error"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+}
+
+// The agent's mux answers a "." or ".." segment with a 301 to the cleaned path. Following it
+// would turn DELETE /v1/branches/main/restore-points/. into GET /v1/branches/main/restore-points
+// and report success without deleting anything.
+func TestClientDoesNotFollowRedirects(t *testing.T) {
+	ops := &agenttest.FakeOps{}
+	url := newAgent(t, ops)
+	hc := &http.Client{}
+	for name, c := range map[string]*agentclient.Client{
+		"default client": agentclient.New(url, "t", nil),
+		"given client":   agentclient.New(url, "t", hc),
+	} {
+		err := c.DeleteRestorePoint(context.Background(), "main", ".")
+		var apiErr *agentclient.APIError
+		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusMovedPermanently {
+			t.Fatalf("%s: DeleteRestorePoint(main, \".\") = %v, want a 301 APIError", name, err)
+		}
+		if got := ops.Last(); got.Op != "" {
+			t.Fatalf("%s: the agent ran %+v", name, got)
+		}
+	}
+	if hc.CheckRedirect != nil {
+		t.Fatal("New changed the caller's http.Client")
 	}
 }

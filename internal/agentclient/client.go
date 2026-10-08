@@ -28,12 +28,16 @@ type Client struct {
 // New returns a client for the agent at baseURL, e.g.
 // "http://volume-agent.cns-a1b2c3d4e5f6.svc:8443". A nil hc gets a client with a 60s timeout:
 // a copy takes about a second, after a lock wait of at most 2s and a backup start whose
-// checkpoint takes longer under write load.
+// checkpoint takes longer under write load. The client never follows redirects, whatever hc
+// says: the agent's mux answers a "." or ".." segment with a 301 to the cleaned path, and
+// following it turns a DELETE into a GET of another resource that reports success.
 func New(baseURL, token string, hc *http.Client) *Client {
-	if hc == nil {
-		hc = &http.Client{Timeout: 60 * time.Second}
+	c := http.Client{Timeout: 60 * time.Second}
+	if hc != nil {
+		c = *hc
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, hc: hc}
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), token: token, hc: &c}
 }
 
 // APIError is a non-2xx response from the agent.
@@ -45,6 +49,9 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
+	if e.Code == "" {
+		return fmt.Sprintf("agent: %d: %s", e.StatusCode, e.Message)
+	}
 	return fmt.Sprintf("agent: %d %s: %s", e.StatusCode, e.Code, e.Message)
 }
 
