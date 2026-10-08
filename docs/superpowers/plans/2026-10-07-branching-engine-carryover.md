@@ -4,15 +4,6 @@
 
 ## 계획 1(감독 프로세스)에서
 
-### 계획 2(볼륨 에이전트)가 반영할 것
-
-- Lima VM의 `/mnt/project` XFS 루프 볼륨은 VM을 재시작하면 다시 마운트되지 않는다(fstab에 없음, 백킹 파일 `/var/lib/consonance-poc/project.img`). VM 준비 스크립트가 영구적으로 마운트해야 한다.
-- 링크와 실행 중인 세대는 다를 수 있다. 브랜치·복구 지점 복사는 감독 프로세스 `GET /v1/status`의 `generation`(실행 중인 세대)을 복사하거나, 그 값이 `current`와 같은지 확인한 뒤 복사한다.
-- 감독 프로세스는 `current`를 해석하지 못하면 링크 자체를 `-D`로 넘긴다(이때 `generation`은 빈 값). 해석할 수 없는 링크에서는 `pgctl.Manager.Start`가 기동을 거부하게 바꾼다.
-- 슈퍼유저의 TCP 접속 차단은 initdb 때 쓰는 `pg_hba.conf`에서 한다. 감독 프로세스는 로컬 소켓으로만 슈퍼유저를 쓴다.
-- `/v1/stop`은 열려 있는 백업 세션을 닫지 않는다. 복사 도중 정지하면 재기동 뒤 최대 30초 동안 `/v1/backup/start`가 409를 돌려준다. 에이전트의 잠금으로 복사와 정지를 직렬화한다.
-- 동시 스냅숏을 막는 장치는 PostgreSQL 인스턴스당 `Backups` 하나뿐이다. PG 15부터는 세션마다 비배타적 백업을 동시에 열 수 있다.
-
 ### 계획 3(CRD·오퍼레이터)이 반영할 것
 
 - 브랜치 파드의 `terminationGracePeriodSeconds`는 45초 이상으로 둔다(stop-grace 30초 + SIGQUIT 뒤 대기 10초 + 여유). 쿠버네티스 기본값 30초는 짧다.
@@ -64,3 +55,25 @@ pgctl 부트스트랩:
 - `.dockerignore`가 `.superpowers`, `test`, `hack`, `images`를 빼지 않아 빌드 캐시가 자주 깨진다. 출시 전에 기반 이미지 태그를 다이제스트로 고정한다.
 - `hack/vm-test.sh`에 패키지 패턴 없이 플래그만 주면 `.`만 테스트한다. `hack/vm-setup.sh`는 `limactl start` 실패를 `|| true`로 숨기고, `NEEDRESTART_SUSPEND=1`이 없고, Go 압축 파일의 SHA-256을 확인하지 않는다.
 - `TestFreePortIsUsable`은 포트 범위만 확인한다. `SocketDir` 테스트가 없고, `InitDB` 테스트는 `PG_VERSION`이 17인지 보지 않는다. `SharedBuffers` 표에 음수, 정확한 경계, 내림 사례가 없다. `Args`는 입력을 검증하지 않는다.
+
+## 계획 2(볼륨 에이전트)에서
+
+### 계획 3(CRD·오퍼레이터)이 반영할 것
+
+- 브랜치 Service `br-<이름>`은 5432와 함께 감독 프로세스 포트 8008을 노출한다. 에이전트는 `http://br-<브랜치>:8008`로 감독 프로세스를 부른다(`--supervisor-url`).
+- 에이전트 파드 인자는 Project spec에서 온다: `--min-copy-interval`(`limits.minCopyInterval`), `--restore-points-per-branch`·`--restore-point-max-age`(`restorePoints`), `--project-id`. 값을 바꾸면 에이전트 파드를 다시 띄워야 반영된다. 볼륨은 `/volume`, 토큰은 Secret `internal-token`을 `/etc/consonance/token`에 마운트한다.
+- main 파드는 init-main이 성공한 뒤에 만든다. 그 전에 뜬 감독 프로세스는 `/v1/start`에 500(`data directory does not resolve`)을 돌려준다.
+- 에이전트 오류 코드에 따라 다르게 한다: `busy`·`supervisor-unavailable`·500은 지수 백오프로 재시도, `rate-limited`는 `Retry-After` 뒤 재시도, `not-running`은 부모가 실행 중이 아님(API 409), `conflict`는 상태 문제라 그대로 재시도하지 않는다. `reflink-unsupported`(501)·`insufficient-storage`(507)와 브랜치 데이터 생성의 `not-found`(부모에 데이터 없음)는 영구 오류다(스펙 10장: phase Failed, 재시도하지 않는다). 복사 도중 원본 브랜치를 정지하면 그 뒤 최대 30초 동안 `busy`가 올 수 있다.
+- 재시도해도 안전한 호출: `CreateBranchData`(데이터가 있으면 그 세대와 빈 LSN), `InitMain`, `DetachGeneration`(이미 옮겼으면 롤백은 toBranch를, 리셋은 그때 만든 복구 지점을 돌려준다), `DeleteBranchData`(없으면 성공). 그래서 `DetachGeneration`의 404는 옮길 세대가 없다는 뜻이다. 롤백·리셋 도중 오퍼레이터가 재시작하면 `ListGenerations`로 남은 세대를 확인하고, 현재 세대가 아닌 남은 세대는 `DeleteGeneration`으로 치운 뒤 다시 만든다.
+- `ActivateGeneration`은 감독 프로세스가 `stopped`를 보일 때만, `DetachGeneration`·`DeleteGeneration`은 PostgreSQL이 그 세대를 쓰지 않을 때만 성공한다(아니면 409).
+- 스펙 11장의 메트릭은 에이전트에 아직 없다(계획 5).
+- 브랜치 데이터 삭제(`DeleteBranchData`)는 브랜치 파드 객체가 사라진 뒤에 부른다. 삭제를 요청한 것만으로는 부족하다. 에이전트는 감독 프로세스가 응답하지 않으면 파드가 없다고 보고 지운다.
+- 롤백의 Detaching 단계는 기존 세대를 백업 브랜치로 옮긴 뒤에 백업 Branch CR을 만든다. CR을 먼저 만들면 그 Branch의 조정이 `CreateBranchData`로 데이터를 먼저 만들어, 옮길 자리가 이미 차 있게 된다(`conflict`).
+- 스펙 11장 로그의 `requestId`는 계획 2에 만드는 곳이 없다. 오퍼레이터·API 서버가 만들어 에이전트에 넘기는 방법(예: 요청 헤더)을 정하고 에이전트 로그에 남긴다.
+- `agentclient.Client`는 `agent.Ops`를 구현하지 않는다(모든 메서드가 `ctx`를 받고 `Preflight`도 오류를 돌려준다). 쓰는 메서드만 모은 인터페이스를 쓰는 쪽에 둔다. 클라이언트는 리다이렉트를 따라가지 않아 3xx도 `APIError`이고, `Code`가 빈 `APIError`는 에이전트가 아닌 곳(프록시 등)의 응답이다.
+- 에이전트 파드(`volume-agent`)의 `terminationGracePeriodSeconds`도 45초 이상으로 둔다. 에이전트는 SIGTERM을 받으면 진행 중인 요청을 최대 25초 기다린 뒤(그 안에 끝나지 않으면 종료 코드 1) 휴지통 비우기가 끝나기를 기다린다. 쿠버네티스 기본값 30초는 빠듯하다.
+
+### 계획 4(REST API 서버)가 반영할 것
+
+- main 리셋은 공개 API가 막는다(스펙 8장 409 `conflict`). 에이전트는 main 삭제만 거부하고, main의 `ParentLatest` 세대 생성(리셋)은 받아들인다.
+- `agentclient` 사용 시 주의점은 계획 3 항목과 같다(`agent.Ops`를 구현하지 않음, 리다이렉트를 따라가지 않음, `Code`가 빈 `APIError`).

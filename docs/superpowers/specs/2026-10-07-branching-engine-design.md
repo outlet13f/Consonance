@@ -282,14 +282,18 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 | `GET /v1/branches/{name}/restore-points` | 목록 |
 | `DELETE /v1/branches/{name}/restore-points/{id}` | 삭제 |
 | `POST /v1/branches/{name}/generations` | 본문 `{source}`. 새 세대 `data-N+1`을 만들지만 활성화하지 않음 |
-| `POST /v1/branches/{name}/generations/{n}/activate` | 브랜치가 정지된 상태에서 `current`를 `data-n`으로 전환 |
-| `POST /v1/branches/{name}/generations/{n}/detach` | 본문 `{toBranch}`. `data-n`을 `branches/<toBranch>/data-1`로 옮기고 `current` 연결 |
+| `POST /v1/branches/{name}/generations/{n}/activate` | 브랜치가 정지된 상태에서 `current`를 `data-n`으로 전환. 감독 프로세스가 정지 상태를 보이지 않으면 409 |
+| `POST /v1/branches/{name}/generations/{n}/detach` | 본문 `{toBranch}` 또는 `{asRestorePoint: true}`. 롤백이면 `data-n`을 `branches/<toBranch>/data-1`로 옮기고 `current` 연결, 리셋이면 복구 지점(`reason: reset`)으로 옮긴다. 현재 세대이거나 PostgreSQL이 쓰고 있는 세대면 409 |
+| `GET /v1/branches/{name}/generations` | 현재 세대와 완성된 세대 목록 |
+| `DELETE /v1/branches/{name}/generations/{n}` | 현재 세대도, PostgreSQL이 쓰는 세대도 아닌 세대를 지운다(롤백 실패 뒤 정리) |
 | `GET /v1/usage` | 볼륨 사용량 |
 
 - 볼륨을 바꾸는 작업은 프로젝트 안에서 한 번에 하나만 한다. 잠금 대기가 2초를 넘으면 409.
 - 같은 원본 브랜치에서의 복사(브랜치·복구 지점)는 직전 복사가 **끝난 시각**부터 `minCopyInterval`이 지나야 한다. 어기면 429와 남은 시간. 복구 지점에서 브랜치를 만드는 복사는 원본 DB에 체크포인트를 걸지 않으므로 이 제한을 받지 않는다.
 - 볼륨 사용률(statfs 기준) 90% 초과 시 복사 작업은 507.
 - 복구 지점 보존 정책(`maxPerBranch`, `maxAge`)은 복구 지점을 만들 때와 1시간마다 적용해 오래된 것부터 지운다.
+- 오류 본문은 `{error, code}`다. `code`: `invalid`(400), `unauthorized`(401), `not-found`(404), `conflict`·`not-running`·`busy`(409), `rate-limited`(429, `Retry-After`), `reflink-unsupported`(501), `supervisor-unavailable`(502), `insufficient-storage`(507), `internal`(500).
+- 감독 프로세스는 `http://br-<브랜치>:8008`로 부른다. 브랜치 Service가 8008을 노출해야 한다.
 
 ### 7.3 브랜치 감독 프로세스 (`cmd/supervisor`, `internal/pgctl`)
 
