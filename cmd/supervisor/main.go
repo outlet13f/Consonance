@@ -12,11 +12,11 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	"consonance/internal/pgctl"
+	"consonance/internal/secretfile"
 	"consonance/internal/supervisor"
 )
 
@@ -74,13 +74,13 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	token, err := readSecret(c.tokenFile)
+	token, err := secretfile.Read(c.tokenFile)
 	if err != nil {
 		return fmt.Errorf("token file: %w", err)
 	}
 	if c.dbPasswordFile != "" {
 		// Bootstrap reads the file again on every call; this only makes a bad one fail at startup.
-		if _, err := readSecret(c.dbPasswordFile); err != nil {
+		if _, err := secretfile.Read(c.dbPasswordFile); err != nil {
 			return fmt.Errorf("tenant password file: %w", err)
 		}
 	}
@@ -102,7 +102,7 @@ func run(args []string) error {
 	}
 	if c.dbPasswordFile != "" {
 		srv.Bootstrap = func(ctx context.Context) error {
-			pw, err := readSecret(c.dbPasswordFile)
+			pw, err := secretfile.Read(c.dbPasswordFile)
 			if err != nil {
 				return fmt.Errorf("tenant password file: %w", err)
 			}
@@ -148,21 +148,6 @@ func run(args []string) error {
 	stopErr := pg.Stop(ctx, c.stopGrace)
 	_ = httpSrv.Shutdown(ctx)
 	return stopErr
-}
-
-// readSecret returns the trimmed contents of a secret file. An empty secret is an error: an empty
-// token would make the API answer 401 to everyone, and an empty tenant password would create a
-// login role without a password.
-func readSecret(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
-	}
-	secret := strings.TrimSpace(string(b))
-	if secret == "" {
-		return "", fmt.Errorf("%s is empty", path)
-	}
-	return secret, nil
 }
 
 func envInt64(name string) int64 {
