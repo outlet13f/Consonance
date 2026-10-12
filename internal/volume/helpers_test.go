@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,49 +13,85 @@ import (
 	"time"
 
 	"consonance/internal/supervisorapi"
+	"consonance/internal/supervisorclient"
 	"consonance/internal/volume"
 )
 
-// fakeSupervisor answers like a branch supervisor without a PostgreSQL behind it.
+// fakeSupervisor answers like a branch supervisor without a PostgreSQL behind it. Like the real
+// client, each call fails with the context's error when the context it gets is already done; such
+// a call never reaches the supervisor, so it is not counted and changes nothing.
 type fakeSupervisor struct {
-	mu       sync.Mutex
-	statuses []supervisorapi.Status // Status returns these in order, then repeats the last one
-	startErr error                  // BackupStart fails with it when set
-	starts   int                    // BackupStart calls
-	stops    int                    // BackupStop calls
-	onStop   func()                 // called inside BackupStop when set
+	mu           sync.Mutex
+	statuses     []supervisorapi.Status // Status returns these in order, then repeats the last one
+	startErr     error                  // BackupStart fails with it when set, without opening a backup
+	startErrOpen error                  // BackupStart opens the backup and then fails with it, as a call that timed out after the supervisor began the backup
+	stopErr      error                  // the next BackupStop fails with it, once and without closing the backup, as a call whose answer never arrived
+	open         bool                   // a backup is open: BackupStart opens it, BackupStop closes it
+	statusCalls  int                    // Status calls
+	starts       int                    // BackupStart calls
+	stops        int                    // BackupStop calls
+	onStatus     func(call int)         // called inside Status once it has chosen its answer, with the call's number (1, 2, ...); runs under mu, so it must not call the fake
+	onStop       func()                 // called inside BackupStop when set; runs under mu, so it must not call the fake
 }
 
-func (f *fakeSupervisor) Status(context.Context) (supervisorapi.Status, error) {
+func (f *fakeSupervisor) Status(ctx context.Context) (supervisorapi.Status, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.statuses) == 0 {
-		return supervisorapi.Status{PG: supervisorapi.PGStopped}, nil
+	if err := ctx.Err(); err != nil {
+		return supervisorapi.Status{}, err
 	}
-	st := f.statuses[0]
-	if len(f.statuses) > 1 {
-		f.statuses = f.statuses[1:]
+	f.statusCalls++
+	st := supervisorapi.Status{PG: supervisorapi.PGStopped}
+	if len(f.statuses) > 0 {
+		st = f.statuses[0]
+		if len(f.statuses) > 1 {
+			f.statuses = f.statuses[1:]
+		}
+	}
+	if f.onStatus != nil {
+		f.onStatus(f.statusCalls)
 	}
 	return st, nil
 }
 
-func (f *fakeSupervisor) BackupStart(context.Context, string) (supervisorapi.BackupStartResponse, error) {
+func (f *fakeSupervisor) BackupStart(ctx context.Context, _ string) (supervisorapi.BackupStartResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return supervisorapi.BackupStartResponse{}, err
+	}
 	f.starts++
 	if f.startErr != nil {
 		return supervisorapi.BackupStartResponse{}, f.startErr
 	}
+	if f.open { // like the real supervisor, which runs one backup at a time
+		return supervisorapi.BackupStartResponse{}, &supervisorclient.APIError{StatusCode: http.StatusConflict, Message: "a backup is already in progress"}
+	}
+	f.open = true
+	if f.startErrOpen != nil {
+		return supervisorapi.BackupStartResponse{}, f.startErrOpen
+	}
 	return supervisorapi.BackupStartResponse{StartLSN: "0/2000028"}, nil
 }
 
-func (f *fakeSupervisor) BackupStop(context.Context) (supervisorapi.BackupStopResponse, error) {
+func (f *fakeSupervisor) BackupStop(ctx context.Context) (supervisorapi.BackupStopResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return supervisorapi.BackupStopResponse{}, err
+	}
 	f.stops++
 	if f.onStop != nil {
 		f.onStop()
 	}
+	if err := f.stopErr; err != nil {
+		f.stopErr = nil
+		return supervisorapi.BackupStopResponse{}, err
+	}
+	if !f.open { // the real supervisor's answer to a stop without a backup
+		return supervisorapi.BackupStopResponse{}, &supervisorclient.APIError{StatusCode: http.StatusConflict, Message: "no backup in progress"}
+	}
+	f.open = false
 	return supervisorapi.BackupStopResponse{
 		LabelFile: "START WAL LOCATION: 0/2000028 (file 000000010000000000000002)\n",
 		StopLSN:   "0/2000100",
@@ -68,11 +105,18 @@ func (f *fakeSupervisor) set(statuses ...supervisorapi.Status) {
 	f.statuses = statuses
 }
 
-// calls returns how often BackupStart and BackupStop were called.
+// calls returns how often BackupStart and BackupStop reached the supervisor.
 func (f *fakeSupervisor) calls() (starts, stops int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.starts, f.stops
+}
+
+// backupOpen reports whether a backup is open on the supervisor.
+func (f *fakeSupervisor) backupOpen() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.open
 }
 
 func running(gen string) supervisorapi.Status {

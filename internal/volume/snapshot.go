@@ -41,6 +41,14 @@ func supervisorErr(branch, call string, err error) error {
 	return fmt.Errorf("%w: %s of branch %q: %v", ErrSupervisorUnavailable, call, branch, err)
 }
 
+// stopBackup ends source's backup without waiting on the caller: a cancelled request must
+// not leave the parent in backup mode until the supervisor's 30s timeout.
+func stopBackup(ctx context.Context, sup Supervisor) {
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusTimeout)
+	defer cancel()
+	_, _ = sup.BackupStop(stopCtx)
+}
+
 // status asks a branch's supervisor for its PostgreSQL state.
 func (v *Volume) status(ctx context.Context, branch string) (supervisorapi.Status, error) {
 	ctx, cancel := context.WithTimeout(ctx, statusTimeout)
@@ -87,14 +95,15 @@ func (v *Volume) snapshot(ctx context.Context, source, dst, label string) (strin
 		if supervisorclient.IsConflict(err) { // a backup is still open, e.g. from a copy cut short
 			return "", fmt.Errorf("%w: backup start on branch %q: %v", ErrBusy, source, err)
 		}
+		// The supervisor may have started the backup before the call failed (our timeout, a
+		// cancelled request, a lost answer). Without an open backup the stop is a harmless 409.
+		stopBackup(ctx, sup)
 		return "", supervisorErr(source, "backup start", err)
 	}
 	ended := false
 	defer func() {
 		if !ended { // end the backup now rather than when the supervisor's 30s timeout fires
-			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusTimeout)
-			defer cancel()
-			_, _ = sup.BackupStop(stopCtx)
+			stopBackup(ctx, sup)
 		}
 	}()
 
@@ -115,13 +124,15 @@ func (v *Volume) snapshot(ctx context.Context, source, dst, label string) (strin
 		return "", err
 	}
 
-	ended = true
-	stopCtx, cancel := context.WithTimeout(ctx, backupTimeout)
+	// The stop must reach the supervisor even when the request was cancelled meanwhile. If it
+	// fails, the deferred stop above tries once more; a second stop is a harmless 409.
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backupTimeout)
 	stop, err := sup.BackupStop(stopCtx)
 	cancel()
 	if err != nil {
 		return "", supervisorErr(source, "backup stop", err)
 	}
+	ended = true
 	if err := writeFileSync(filepath.Join(dst, "backup_label"), []byte(stop.LabelFile), 0o600); err != nil {
 		return "", err
 	}

@@ -1,9 +1,12 @@
 package volume_test
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +14,7 @@ import (
 	"consonance/internal/agentapi"
 	"consonance/internal/supervisorapi"
 	"consonance/internal/supervisorclient"
+	"consonance/internal/testutil/xfstest"
 	"consonance/internal/volume"
 )
 
@@ -210,6 +214,144 @@ func TestFailedCopyEndsBackupAndCleansUp(t *testing.T) {
 	}
 }
 
+// copiesOfMain are two ways to make a backup-mode copy of main: as the first generation of
+// branch dev, and as a restore point of main. finished checks that the copy exists and is
+// complete.
+var copiesOfMain = []struct {
+	name     string
+	run      func(ctx context.Context, v *volume.Volume) error
+	finished func(t *testing.T, root string, v *volume.Volume)
+}{
+	{
+		name: "branch",
+		run: func(ctx context.Context, v *volume.Volume) error {
+			_, err := v.CreateBranchData(ctx, "dev", parentLatest("main"))
+			return err
+		},
+		finished: func(t *testing.T, root string, v *volume.Volume) {
+			t.Helper()
+			if gens, err := v.ListGenerations("dev"); err != nil || gens.Current != 1 || !slices.Equal(gens.Generations, []int{1}) {
+				t.Fatalf("dev's generations = %+v, %v; want data-1, current", gens, err)
+			}
+			if !exists(filepath.Join(root, "branches", "dev", "data-1", "backup_label")) {
+				t.Fatal("the copy has no backup_label")
+			}
+		},
+	},
+	{
+		name: "restore point",
+		run: func(ctx context.Context, v *volume.Volume) error {
+			_, err := v.CreateRestorePoint(ctx, "main", agentapi.CreateRestorePointRequest{Label: "copy"})
+			return err
+		},
+		finished: func(t *testing.T, root string, v *volume.Volume) {
+			t.Helper()
+			list, err := v.ListRestorePoints("main")
+			if err != nil || len(list) != 1 {
+				t.Fatalf("main's restore points = %+v, %v; want one", list, err)
+			}
+			if !exists(filepath.Join(root, "restore", "main", list[0].ID, "backup_label")) {
+				t.Fatal("the restore point has no backup_label")
+			}
+		},
+	},
+}
+
+// xfsMain makes a main on XFS that a copy can clone: its data-1 holds the WAL segment that the
+// fake supervisor's backup label names as the backup's start.
+func xfsMain(t *testing.T) string {
+	t.Helper()
+	root := xfstest.Dir(t)
+	gen := mkGeneration(t, root, "main", 1, true)
+	writeFile(t, filepath.Join(gen, "pg_wal", "000000010000000000000002"), "wal", 0o600)
+	return root
+}
+
+// A request that is cancelled while the backup runs must not leave the parent in backup mode:
+// the stop goes out all the same, and the copy, which needs no request any more, finishes.
+func TestCancelledRequestStillEndsTheBackup(t *testing.T) {
+	for _, tc := range copiesOfMain {
+		t.Run(tc.name, func(t *testing.T) {
+			root := xfsMain(t)
+			main := &fakeSupervisor{statuses: []supervisorapi.Status{running("data-1")}}
+			v := openVolume(t, root, supervisors{"main": main}, nil)
+			ctx, cancel := context.WithCancel(testCtx(t))
+			defer cancel()
+			// The second status call checks the server after the backup started: the request is
+			// cancelled right after the supervisor answered it.
+			main.onStatus = func(call int) {
+				if call == 2 {
+					cancel()
+				}
+			}
+			if err := tc.run(ctx, v); err != nil {
+				t.Fatalf("the copy of a request cancelled mid-copy failed: %v", err)
+			}
+			if ctx.Err() == nil {
+				t.Fatal("the request was never cancelled, so this test checked nothing")
+			}
+			if starts, stops := main.calls(); starts != 1 || stops != 1 || main.backupOpen() {
+				t.Fatalf("backup start/stop calls = %d/%d, open = %v; want 1/1 and the backup ended", starts, stops, main.backupOpen())
+			}
+			tc.finished(t, root, v)
+		})
+	}
+}
+
+// A backup start that fails after the supervisor began the backup (our own timeout, a cancelled
+// request, a lost answer) must not leave the parent in backup mode either.
+func TestFailedBackupStartEndsTheBackup(t *testing.T) {
+	for _, tc := range copiesOfMain {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			mkGeneration(t, root, "main", 1, true)
+			main := &fakeSupervisor{
+				statuses:     []supervisorapi.Status{running("data-1")},
+				startErrOpen: fmt.Errorf("post backup/start: %w", context.DeadlineExceeded),
+			}
+			clock := newClock()
+			v := openVolume(t, root, supervisors{"main": main}, func(c *volume.Config) {
+				c.MinCopyInterval = time.Minute
+				c.Now = clock.Now
+			})
+			if err := tc.run(testCtx(t), v); !errors.Is(err, volume.ErrSupervisorUnavailable) {
+				t.Fatalf("got %v, want ErrSupervisorUnavailable", err)
+			}
+			if starts, stops := main.calls(); starts != 1 || stops != 1 || main.backupOpen() {
+				t.Fatalf("backup start/stop calls = %d/%d, open = %v; want 1/1 and the backup ended", starts, stops, main.backupOpen())
+			}
+			if exists(filepath.Join(root, "branches", "dev")) {
+				t.Fatal("a partial branch was left behind")
+			}
+			if entries, _ := os.ReadDir(filepath.Join(root, "restore", "main")); len(entries) != 0 {
+				t.Fatalf("restore point directories were left behind: %v", entries)
+			}
+			// The attempt may have cost main a checkpoint, so it counts for the interval.
+			var rl *volume.RateLimitError
+			if err := tc.run(testCtx(t), v); !errors.As(err, &rl) || rl.RetryAfter != time.Minute {
+				t.Fatalf("second copy = %v, want a rate limit of 1m", err)
+			}
+		})
+	}
+}
+
+// A stop that fails once the data is cloned is tried again when the copy gives up, so that a
+// lost answer does not leave the parent in backup mode.
+func TestFailedBackupStopIsTriedAgain(t *testing.T) {
+	root := xfsMain(t)
+	main := &fakeSupervisor{statuses: []supervisorapi.Status{running("data-1")}, stopErr: errNoAnswer}
+	v := openVolume(t, root, supervisors{"main": main}, nil)
+	if _, err := v.CreateBranchData(testCtx(t), "dev", parentLatest("main")); !errors.Is(err, volume.ErrSupervisorUnavailable) {
+		t.Fatalf("got %v, want ErrSupervisorUnavailable", err)
+	}
+	if starts, stops := main.calls(); starts != 1 || stops != 2 || main.backupOpen() {
+		t.Fatalf("backup start/stop calls = %d/%d, open = %v; want 1/2 and the backup ended by the second stop", starts, stops, main.backupOpen())
+	}
+	if exists(filepath.Join(root, "branches", "dev")) {
+		t.Fatal("a partial branch was left behind")
+	}
+}
+
 func TestCopyIntervalCountsFromTheEndOfTheLastCopy(t *testing.T) {
 	root := t.TempDir()
 	mkGeneration(t, root, "main", 1, true)
@@ -270,6 +412,10 @@ func TestOpenBackupOnParentIsBusy(t *testing.T) {
 	v := openVolume(t, root, supervisors{"main": main}, nil)
 	if _, err := v.CreateBranchData(testCtx(t), "dev", parentLatest("main")); !errors.Is(err, volume.ErrBusy) {
 		t.Fatalf("got %v, want ErrBusy", err)
+	}
+	// The open backup is not ours: ending it would cut short whoever's copy it is.
+	if starts, stops := main.calls(); starts != 1 || stops != 0 {
+		t.Fatalf("backup start/stop calls = %d/%d, want 1/0", starts, stops)
 	}
 	if exists(filepath.Join(root, "branches", "dev")) {
 		t.Fatal("branches/dev was left behind")
