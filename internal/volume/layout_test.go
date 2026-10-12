@@ -172,8 +172,8 @@ func TestStateOf(t *testing.T) {
 	if err == nil {
 		t.Fatal("file: want an error")
 	}
-	if st != 0 {
-		t.Fatalf("file: state = %d; want 0", st)
+	if st != dirUnknown {
+		t.Fatalf("file: state = %d; want dirUnknown", st)
 	}
 
 	// Directory under a parent with mode 0o000
@@ -198,6 +198,9 @@ func TestStateOf(t *testing.T) {
 	if errors.Is(err, os.ErrNotExist) {
 		t.Fatal("inaccessible child: error should not be ErrNotExist")
 	}
+	if st != dirUnknown {
+		t.Fatalf("inaccessible child: state = %d; want dirUnknown", st)
+	}
 }
 
 func TestCurrentGenerationReportsOtherErrors(t *testing.T) {
@@ -216,6 +219,21 @@ func TestCurrentGenerationReportsOtherErrors(t *testing.T) {
 	}
 	if errors.Is(err, ErrNotFound) {
 		t.Fatal("current as directory: error should not be ErrNotFound")
+	}
+
+	// current as a link that names no generation, though the branch holds complete ones: the
+	// agent writes only data-N targets, so somebody else put it there
+	mustMkdirAll(t, l.genDir("hand", 1), l.genDir("hand", 2))
+	handLink := filepath.Join(l.branchDir("hand"), "current")
+	for _, target := range []string{"./data-2", "data-02", "../hand/data-1", "elsewhere"} {
+		_ = os.Remove(handLink)
+		if err := os.Symlink(target, handLink); err != nil {
+			t.Fatal(err)
+		}
+		_, err := l.currentGeneration("hand")
+		if err == nil || errors.Is(err, ErrNotFound) {
+			t.Errorf("current -> %q: %v; want an error that is not ErrNotFound", target, err)
+		}
 	}
 
 	// Branch directory with mode 0o000

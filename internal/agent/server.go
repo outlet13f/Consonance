@@ -19,7 +19,7 @@ import (
 
 // Ops is the volume work behind the API (implemented by *volume.Volume).
 type Ops interface {
-	Preflight() agentapi.Preflight
+	Preflight() (agentapi.Preflight, error)
 	Usage() (agentapi.Usage, error)
 	InitMain(ctx context.Context) (agentapi.Generation, error)
 	CreateBranchData(ctx context.Context, name string, req agentapi.CreateBranchDataRequest) (agentapi.BranchData, error)
@@ -87,7 +87,8 @@ func (s *Server) auth(next http.HandlerFunc) http.Handler {
 }
 
 func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.Ops.Preflight())
+	p, err := s.Ops.Preflight()
+	reply(w, p, err)
 }
 
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {

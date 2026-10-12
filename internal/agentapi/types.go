@@ -62,11 +62,13 @@ type RestorePoint struct {
 	BackupStartLSN string    `json:"backupStartLSN"`
 }
 
-// Preflight is returned by GET /v1/preflight.
+// Preflight is returned by GET /v1/preflight. Reflink is false, with the reason in Error, only
+// when the volume cannot make reflink copies; a probe that failed for another reason (EACCES,
+// ENOSPC, EIO...) is a 500 instead.
 type Preflight struct {
 	Reflink bool   `json:"reflink"`
 	Kernel  string `json:"kernel"`
-	Error   string `json:"error,omitempty"` // why the reflink probe failed
+	Error   string `json:"error,omitempty"` // why the volume cannot make reflink copies
 }
 
 // Usage is returned by GET /v1/usage (statfs of the volume).

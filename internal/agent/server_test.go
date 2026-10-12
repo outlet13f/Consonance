@@ -156,6 +156,23 @@ func TestErrorsMapToStatusAndCode(t *testing.T) {
 	}
 }
 
+// A reflink probe that failed for another reason than missing support (EACCES, ENOSPC, EIO) is an
+// internal error, not "reflink: false": the operator fails a project for good on that answer.
+func TestPreflightFailureIsAnInternalError(t *testing.T) {
+	ops := &agenttest.FakeOps{PreflightResult: agentapi.Preflight{Kernel: "6.8.0-63-generic"}}
+	srv := newServer(t, ops, token)
+	probeErr := errors.New("reflink probe: mkdir /volume/.consonance/preflight-1: permission denied")
+	ops.SetErr(probeErr)
+	resp, body := call(t, srv, "GET", "/v1/preflight", "", true)
+	var e agentapi.Error
+	if err := json.Unmarshal([]byte(body), &e); err != nil {
+		t.Fatalf("body %q: %v", body, err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError || e.Code != agentapi.CodeInternal || e.Error != probeErr.Error() {
+		t.Fatalf("GET /v1/preflight = %d %+v, want 500 %s %q", resp.StatusCode, e, agentapi.CodeInternal, probeErr)
+	}
+}
+
 func TestBadRequestsStopAtTheAPI(t *testing.T) {
 	ops := &agenttest.FakeOps{}
 	srv := newServer(t, ops, token)

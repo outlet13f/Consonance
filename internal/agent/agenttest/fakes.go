@@ -58,9 +58,9 @@ func (f *FakeOps) record(c Call) error {
 	return f.err
 }
 
-func (f *FakeOps) Preflight() agentapi.Preflight {
-	_ = f.record(Call{Op: "Preflight"})
-	return f.PreflightResult
+func (f *FakeOps) Preflight() (agentapi.Preflight, error) {
+	err := f.record(Call{Op: "Preflight"})
+	return f.PreflightResult, err
 }
 
 func (f *FakeOps) Usage() (agentapi.Usage, error) {

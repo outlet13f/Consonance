@@ -96,6 +96,30 @@ func TestRecoverStopsOnACurrentItCannotRead(t *testing.T) {
 	}
 }
 
+// The agent writes only data-N link targets. A current that names no generation was put there by
+// hand, and its branch may still hold complete generations: Recover stops instead of trashing it.
+func TestRecoverStopsOnACurrentThatNamesNoGeneration(t *testing.T) {
+	root := t.TempDir()
+	gen1 := mkGeneration(t, root, "dev", 1, false)
+	gen2 := mkGeneration(t, root, "dev", 2, false)
+	link := filepath.Join(root, "branches", "dev", "current")
+	if err := os.Symlink("./data-2", link); err != nil {
+		t.Fatal(err)
+	}
+	v := openVolume(t, root, nil, nil)
+	if removed, err := v.Recover(); err == nil {
+		t.Fatalf("Recover went on past a current link that names no generation, removing %q", removed)
+	}
+	for _, gen := range []string{gen1, gen2} {
+		if !exists(filepath.Join(gen, "PG_VERSION")) {
+			t.Errorf("Recover removed %s", gen)
+		}
+	}
+	if target, err := os.Readlink(link); err != nil || target != "./data-2" {
+		t.Errorf("dev/current = %q, %v; want it left as it was", target, err)
+	}
+}
+
 func TestRecoverWithoutACatalogKeepsFinishedRestorePoints(t *testing.T) {
 	root := t.TempDir()
 	mkGeneration(t, root, "main", 1, true)

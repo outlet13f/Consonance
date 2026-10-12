@@ -27,7 +27,9 @@ type Supervisor interface {
 	BackupStop(ctx context.Context) (supervisorapi.BackupStopResponse, error)
 }
 
-// Config configures a Volume. A zero limit is no limit; cmd/agent passes the spec 14 defaults.
+// Config configures a Volume. A zero MinCopyInterval, MaxUsedPercent, RestorePointsPerBranch or
+// RestorePointMaxAge is no limit; a zero LockWait is no wait: an operation reports busy at once
+// when the lock is held. cmd/agent passes the spec 14 defaults.
 type Config struct {
 	Root                   string                         // volume root, e.g. /volume
 	InitDB                 string                         // initdb binary for InitMain
@@ -167,16 +169,27 @@ func (v *Volume) checkSpace() error {
 	return nil
 }
 
+// errReflinkMismatch is the probe's finding that a reflink copy differs from its source.
+var errReflinkMismatch = errors.New("the reflink copy differs from its source")
+
 // Preflight clones a probe file to check that the volume can make reflink copies (spec 7.2
-// GET /v1/preflight) and reports the kernel version.
-func (v *Volume) Preflight() agentapi.Preflight {
+// GET /v1/preflight) and reports the kernel version. Reflink is true when the probe passes. It is
+// false, with the reason in Error, only when the volume cannot make reflink copies: the clone is
+// refused (ErrReflinkUnsupported) or its copy differs from its source, which is as unusable as no
+// reflink. Any other probe failure (EACCES, ENOSPC, EIO...) says nothing about reflink support
+// and is returned as an error, wrapped as "reflink probe: ...".
+func (v *Volume) Preflight() (agentapi.Preflight, error) {
 	res := agentapi.Preflight{Kernel: kernelVersion()}
-	if err := v.probeReflink(); err != nil {
+	err := v.probeReflink()
+	switch {
+	case err == nil:
+		res.Reflink = true
+	case errors.Is(err, ErrReflinkUnsupported), errors.Is(err, errReflinkMismatch):
 		res.Error = err.Error()
-		return res
+	default:
+		return agentapi.Preflight{}, fmt.Errorf("reflink probe: %w", err)
 	}
-	res.Reflink = true
-	return res
+	return res, nil
 }
 
 func (v *Volume) probeReflink() error {
@@ -200,7 +213,7 @@ func (v *Volume) probeReflink() error {
 		return err
 	}
 	if !bytes.Equal(got, want) {
-		return errors.New("the reflink copy differs from its source")
+		return errReflinkMismatch
 	}
 	return nil
 }
@@ -215,7 +228,7 @@ func kernelVersion() string {
 }
 
 // trash moves path into .consonance/trash, from where EmptyTrash deletes it outside the
-// operation lock. A missing path is not an error.
+// operation lock. The move is durable when trash returns. A missing path is not an error.
 func (v *Volume) trash(path string) error {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
@@ -225,11 +238,14 @@ func (v *Volume) trash(path string) error {
 		}
 		return err
 	}
+	// Make the move durable before the caller reports success: after a crash, a deleted branch
+	// must not come back and hand its old data to a new branch of the same name.
+	err := errors.Join(syncDir(filepath.Dir(path)), syncDir(v.trashPath()))
 	select {
 	case v.trashed <- struct{}{}:
 	default:
 	}
-	return nil
+	return err
 }
 
 // trashOrWarn trashes path and only logs a failure: the caller has a more important error to

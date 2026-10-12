@@ -74,23 +74,24 @@ func parseGeneration(name string) (int, bool) {
 type dirState int
 
 const (
-	dirMissing  dirState = iota // the directory does not exist
+	dirUnknown  dirState = iota // stateOf failed: nothing is known for sure
+	dirMissing                  // the directory does not exist
 	dirMarked                   // it exists and still holds the .incomplete marker
 	dirComplete                 // it exists without the marker
 )
 
 // stateOf reports dir's state. An error other than "does not exist" is returned as it is, so
-// that no caller deletes or re-creates data on a guess.
+// that no caller deletes or re-creates data on a guess; the state is dirUnknown then.
 func stateOf(dir string) (dirState, error) {
 	fi, err := os.Stat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return dirMissing, nil
 	}
 	if err != nil {
-		return 0, err
+		return dirUnknown, err
 	}
 	if !fi.IsDir() {
-		return 0, fmt.Errorf("%s is not a directory", dir)
+		return dirUnknown, fmt.Errorf("%s is not a directory", dir)
 	}
 	_, err = os.Lstat(filepath.Join(dir, incompleteMarker))
 	switch {
@@ -99,7 +100,7 @@ func stateOf(dir string) (dirState, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		return dirComplete, nil
 	default:
-		return 0, err
+		return dirUnknown, err
 	}
 }
 
@@ -111,8 +112,10 @@ func complete(dir string) bool {
 }
 
 // currentGeneration returns the generation the branch's current link points at. It is
-// ErrNotFound only when the branch certainly has no data: the link is missing, names no
-// generation, or leads to a missing or unfinished one. Any other error is returned as it is.
+// ErrNotFound only when the branch certainly has no data: the link is missing, or leads to a
+// missing or unfinished generation. Any other error is returned as it is, including a link that
+// names no generation: the agent writes only data-N targets, so anything else was put there by
+// hand, and the branch may still hold complete generations.
 func (l layout) currentGeneration(branch string) (int, error) {
 	target, err := os.Readlink(filepath.Join(l.branchDir(branch), currentLink))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -123,7 +126,7 @@ func (l layout) currentGeneration(branch string) (int, error) {
 	}
 	n, ok := parseGeneration(target)
 	if !ok {
-		return 0, fmt.Errorf("%w: branch %q: current points at %q, which is no generation", ErrNotFound, branch, target)
+		return 0, fmt.Errorf("branch %q: current points at %q, which is no generation", branch, target)
 	}
 	st, err := stateOf(l.genDir(branch, n))
 	if err != nil {

@@ -10,13 +10,14 @@ import (
 
 // Recover clears up after operations that an agent restart cut short (spec 6, 10). Run it before
 // serving requests. It trashes generation and restore point directories still marked
-// .incomplete, current.tmp links, branch directories whose current link is missing or leads
-// nowhere (a branch whose creation did not finish), restore point directories the catalog does
-// not list and preflight leftovers, and drops catalog entries whose directory is gone. Data the
-// volume still accounts for — a branch's linked generations and the restore points its catalog
-// lists — is never touched; without a catalog file, only restore point directories still marked
-// .incomplete are removed. It deletes only on certain evidence (a marker, a missing or dangling
-// link, a missing directory); any other error stops it, so the agent fails to start rather than
+// .incomplete, current.tmp links, branch directories whose current link is missing or leads to
+// a missing or unfinished generation (a branch whose creation did not finish), restore point
+// directories the catalog does not list and preflight leftovers, and drops catalog entries whose
+// directory is gone. Data the volume still accounts for — a branch's linked generations and the
+// restore points its catalog lists — is never touched; without a catalog file, only restore
+// point directories still marked .incomplete are removed. It deletes only on certain evidence (a
+// marker, a missing or dangling link, a missing directory); any other error stops it (a current
+// that cannot be read, or that names no generation), so the agent fails to start rather than
 // delete data on a guess. It returns what it removed, relative to the volume root; a dropped
 // catalog entry appears as "catalog:<id>".
 func (v *Volume) Recover() ([]string, error) {
