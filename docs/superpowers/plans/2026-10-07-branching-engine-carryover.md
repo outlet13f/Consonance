@@ -63,7 +63,7 @@ pgctl 부트스트랩:
 - 브랜치 Service `br-<이름>`은 5432와 함께 감독 프로세스 포트 8008을 노출한다. 에이전트는 `http://br-<브랜치>:8008`로 감독 프로세스를 부른다(`--supervisor-url`).
 - 에이전트 파드 인자는 Project spec에서 온다: `--min-copy-interval`(`limits.minCopyInterval`), `--restore-points-per-branch`·`--restore-point-max-age`(`restorePoints`), `--project-id`. 값을 바꾸면 에이전트 파드를 다시 띄워야 반영된다. 볼륨은 `/volume`, 토큰은 Secret `internal-token`(키 `token`)을 `/etc/consonance/token`에 마운트한다(에이전트는 `/etc/consonance/token/token`을 읽는다).
 - main 파드는 init-main이 성공한 뒤에 만든다. 그 전에 뜬 감독 프로세스는 `/v1/start`에 500(`data directory does not resolve`)을 돌려준다.
-- 에이전트 오류 코드에 따라 다르게 한다: `busy`·`supervisor-unavailable`·500은 지수 백오프로 재시도, `rate-limited`는 `Retry-After` 뒤 재시도, `not-running`은 부모가 실행 중이 아님(API 409), `conflict`는 상태 문제라 그대로 재시도하지 않는다. 단 복사(`CreateBranchData`·`CreateGeneration`·`CreateRestorePoint`)의 `conflict`는 복사 도중 원본이 다른 세대로 다시 시작했다는 뜻이므로, 원본이 다시 실행 중이 되면 재시도한다. `reflink-unsupported`(501)·`insufficient-storage`(507)와 브랜치 데이터 생성의 `not-found`(부모에 데이터 없음)는 영구 오류다(스펙 10장: phase Failed, 재시도하지 않는다). 복사 도중 원본 브랜치를 정지하면 그 뒤 최대 30초 동안 `busy`가 올 수 있다.
+- 에이전트 오류 코드에 따라 다르게 한다: `busy`·`supervisor-unavailable`·500은 지수 백오프로 재시도, `rate-limited`는 `Retry-After` 뒤 재시도, `not-running`은 부모가 실행 중이 아님(API 409), `conflict`는 상태 문제라 그대로 재시도하지 않는다. 단 복사(`CreateBranchData`·`CreateGeneration`·`CreateRestorePoint`)의 `conflict`는 복사 도중 원본이 멈췄거나 다른 세대로 다시 시작했다는 뜻이므로, 원본이 다시 실행 중이 되면 재시도한다. `reflink-unsupported`(501)·`insufficient-storage`(507)와 브랜치 데이터 생성의 `not-found`(부모에 데이터 없음)는 영구 오류다(스펙 10장: phase Failed, 재시도하지 않는다). 복사 도중 원본 브랜치를 정지하면 그 뒤 최대 30초 동안 `busy`가 올 수 있다.
 - 재시도해도 안전한 호출: `CreateBranchData`(데이터가 있으면 그 세대와 빈 LSN), `InitMain`, `DetachGeneration`(이미 옮겼으면 롤백은 toBranch를, 리셋은 그때 만든 복구 지점을 돌려준다), `DeleteBranchData`(없으면 성공). 그래서 `DetachGeneration`의 404는 옮길 세대가 없다는 뜻이다. `CreateGeneration`은 부를 때마다 새 세대를 만들므로 재시도해도 안전하지 않다. 그래서 Preparing에서 세대를 만들기 전에는 언제나(오퍼레이터가 재시작한 뒤든 재시도든) `ListGenerations`로 현재 세대보다 번호가 큰 세대(활성화하지 못한 앞 시도의 결과)를 `DeleteGeneration`으로 치우고, `CreateGeneration`이 돌려준 세대 말고도 현재 세대보다 큰 세대가 있으면(응답을 잃은 앞 요청이나 앞 오퍼레이터가 보낸 요청이 만든 것) Activating 전에 지운다. 새 세대는 언제나 있는 세대들보다 큰 번호를 받는다. 현재 세대보다 번호가 작은 세대는 사용자의 롤백·리셋 전 데이터일 수 있으므로 지우지 않는다.
 - `ActivateGeneration`은 감독 프로세스가 `stopped`를 보일 때만 `current`를 바꾼다(다른 상태면 409, 감독 프로세스가 응답하지 않으면 502 `supervisor-unavailable`). n이 이미 현재 세대면 감독 프로세스에 묻지 않고 성공하므로 다시 불러도 안전하다. `DetachGeneration`·`DeleteGeneration`은 n이 현재 세대이거나 PostgreSQL이 그 세대를 쓰고 있으면 409, 감독 프로세스가 응답하지 않으면 502다.
 - 스펙 11장의 메트릭은 에이전트에 아직 없다(계획 5).
@@ -91,6 +91,7 @@ pgctl 부트스트랩:
 - `generations()`·`nextGeneration()`은 브랜치가 없을 때 PathError를 그대로 돌려준다(삭제와 겹친 `ListGenerations`가 404가 아니라 500). `generations()`는 상태를 확인하지 못한 세대를 목록에서 조용히 뺀다. Activate·Detach·DeleteGeneration은 Lstat·`complete()` 때문에 EACCES·EIO를 404로 보고하고(Detach의 거짓 404는 오퍼레이터가 백업 브랜치를 건너뛰게 한다), `ListRestorePoints`는 `os.Stat` 오류를 모두 404로 바꾼다. `stateOf`를 쓴다.
 - `DetachGeneration`의 toBranch 재시도 지름길은 원본 브랜치가 없어도 성공한다. 먼저 `currentGeneration(branch)`를 확인한다.
 - `acquire`가 돌려주는 release는 두 번 부르면 막힌다(`sync.Once`). `trash`는 rename 양쪽의 ENOENT를 모두 "이미 없음"으로 본다. `makeMarked`는 `os.Remove` 오류를 버린다.
+- `trash`가 rename한 뒤 sync에 실패하면(500) 재시도에서는 경로가 이미 없어 sync 없이 성공한다. 그래서 다시 보낸 `DeleteBranchData`가 아직 내구화되지 않은 이동 위에서 204를 줄 수 있다(fsync가 실패하고도 파일 시스템이 살아 있어야 해서 드묾).
 - `CloneTree("")`는 작업 디렉터리를 복사한다. 빈 src를 `ErrInvalid`로 거부한다.
 - 문서: `CloneTree`는 dst가 비어 있어야 하고 실패하면 일부가 남는다. `switchCurrent`는 작업 잠금 아래에서만 부르고, rename이 실패하면 `current.tmp`가 남는다. `finishMarked`는 파일 데이터가 먼저 내구화돼 있어야 한다. `Recover`의 "건드리지 않는다"는 문자 그대로가 아니다. pgctl의 `ErrNoDataDir` 주석은 디렉터리로 이어지는지 본다고 하지만 `EvalSymlinks`만 확인하고, `Start` 문서에 이 오류가 없다.
 
@@ -114,6 +115,7 @@ API·클라이언트·실행 파일:
 
 - cmd/agent: 25초 drain(`Shutdown`을 `Close`로 바꿔도 통과한다), `{branch}`·토큰 연결, `--project-id`, 플래그 검사를 시험하지 않는다. 응답을 붙잡는 가짜 감독 프로세스 하나로 넷 다 시험할 수 있다. `go test -race`는 에이전트 실행 파일을 계측하지 않는다.
 - volume: 실행 중인 세대를 복사하는지(`current`가 아니라. 호스트에서도 가능), 507 경계, 백업 시작 전에 거부된 복사(정지·응답 없음)는 간격에 넣지 않는지, 만들 때·정리 작업 때의 보존 정책, 잘못된 ID와 256바이트 라벨, 리셋 복구 지점의 `reason == reset` 조건과 내용, 다른 브랜치 데이터가 남는지, 표시된 세대의 Activate 거부, 취소된 initdb와 동시 InitMain, `stateOf`의 표시 확인 오류와 `%w`, `generations()` 정렬(data-2·data-10), 두 단계 chmod·사라지는 심볼릭 링크·src 오류, 카탈로그의 빈 저장·나이·개수·경계·깨진 파일, ID를 10번 뽑는 제한을 시험하지 않는다.
+- 백업 시작이 실패한 경로와 지연된 정지 경로에서 `stopBackup`의 `WithoutCancel`을 취소된 요청으로 시험하지 않는다(두 번째 상태 호출에서 요청을 취소하면 `ErrConflict`, 시작·정지 1/1, 백업이 닫혀 있어야 한다). 백업 시작 도중 요청이 취소되는 경우도 시간 초과 쪽만 시험한다.
 - 여러 테스트(`TestFailedCopyEndsBackupAndCleansUp`, reflink 없는 preflight 등)가 TMPDIR에서는 reflink가 안 된다고 가정한다. 시험 복제가 되면 건너뛴다. pgEnv 도우미는 접속을 테스트가 끝날 때까지 연다(max_connections 20).
 - 에이전트 API: 성공 본문·Content-Type, 틀린 토큰, `Retry-After` 하한, 5xx를 Error 수준으로 남기는 규칙을 시험하지 않는다. 클라이언트: 2xx 디코드 실패, ctx 취소, 기본 제한 60초를 시험하지 않는다.
 - pgctl: `Start`의 "postgres exited during startup" 경로(종료 코드 1을 내는 가짜 실행 파일)와 `ErrNoDataDir`→500 처리기를 시험하지 않는다. `resolveDir`가 `EvalSymlinks` 오류를 버려 EACCES·ELOOP·ENOTDIR가 모두 "does not resolve"가 된다.
