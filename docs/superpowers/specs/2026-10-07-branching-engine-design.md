@@ -255,7 +255,7 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 1. Secret `db-credentials`(없을 때만 생성), Secret `internal-token`(에이전트·감독 프로세스 간 인증), NetworkPolicy, ResourceQuota를 맞춘다.
 2. PVC `project-volume`(RWO, `spec.storage`)을 만든다.
 3. 에이전트 파드 `volume-agent`를 띄운다(Project가 소유).
-4. 에이전트 `GET /v1/preflight`로 reflink 지원을 확인한다. 실패하면 `ReflinkSupported=False`(이유 `ReflinkUnsupported`), phase Failed.
+4. 에이전트 `GET /v1/preflight`로 reflink 지원을 확인한다. `reflink: false`면 `ReflinkSupported=False`(이유 `ReflinkUnsupported`), phase Failed. 500은 일시 오류로 보고 다시 확인한다.
 5. main Branch가 없으면 만들고, 에이전트 `POST /v1/init-main`으로 `branches/main/data-1`을 초기화한다. main의 데이터는 여기서만 만든다.
 6. main이 처음 Running이 되면 감독 프로세스 `POST /v1/bootstrap`을 호출해 접속 계정을 만들고 `MainReady=True`로 둔다. 이미 있으면 건너뛰므로 다시 호출해도 안전하다.
 7. 모든 조건이 참이면 phase Ready.
@@ -274,14 +274,14 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 
 | 엔드포인트 | 동작 |
 | --- | --- |
-| `GET /v1/preflight` | 볼륨에서 시험 파일을 `FICLONE`으로 복제해 reflink 지원 확인, 커널 버전 보고 |
+| `GET /v1/preflight` | 볼륨에서 시험 파일을 `FICLONE`으로 복제해 reflink 지원 확인, 커널 버전 보고. 지원하지 않으면(복제본이 원본과 달라도) `reflink: false`와 이유, 시험이 다른 이유(EACCES·ENOSPC·EIO 등)로 실패하면 500 |
 | `POST /v1/init-main` | `initdb`로 `branches/main/data-1` 생성, `current` 연결 |
 | `POST /v1/branches/{name}/data` | 본문 `{parent, source}`. 부모 감독 프로세스 백업 시작 → reflink 복사(pg_wal·postmaster.pid·postmaster.opts 제외) → 백업 종료(backup_label 기록) → pg_wal reflink 복사 → `current` 연결. 출처가 복구 지점이면 복구 지점 디렉터리를 reflink 복사 |
 | `DELETE /v1/branches/{name}/data` | 브랜치 디렉터리와 그 브랜치의 복구 지점 삭제 |
 | `POST /v1/branches/{name}/restore-points` | 본문 `{label, reason}`. 같은 백업 모드 복사를 `restore/`에 하고 카탈로그에 추가, 보존 정책으로 오래된 것 정리 |
 | `GET /v1/branches/{name}/restore-points` | 목록 |
 | `DELETE /v1/branches/{name}/restore-points/{id}` | 삭제 |
-| `POST /v1/branches/{name}/generations` | 본문 `{source}`. 새 세대 `data-N+1`을 만들지만 활성화하지 않음 |
+| `POST /v1/branches/{name}/generations` | 본문 `{parent, source}`(`parent`는 출처가 부모 최신일 때만 쓴다). 새 세대 `data-N+1`을 만들지만 활성화하지 않음. 부를 때마다 새 세대를 만든다 |
 | `POST /v1/branches/{name}/generations/{n}/activate` | 브랜치가 정지된 상태에서 `current`를 `data-n`으로 전환. 감독 프로세스가 정지가 아닌 상태를 보이면 409, 응답하지 않으면 502. n이 이미 현재 세대면 아무것도 바꾸지 않고 성공 |
 | `POST /v1/branches/{name}/generations/{n}/detach` | 본문 `{toBranch}` 또는 `{asRestorePoint: true}`. 롤백이면 `data-n`을 `branches/<toBranch>/data-1`로 옮기고 `current` 연결, 리셋이면 복구 지점(`reason: reset`)으로 옮긴다. 현재 세대이거나 PostgreSQL이 쓰고 있는 세대면 409, 감독 프로세스가 응답하지 않으면 502 |
 | `GET /v1/branches/{name}/generations` | 현재 세대와 완성된 세대 목록 |
