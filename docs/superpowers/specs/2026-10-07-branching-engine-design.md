@@ -293,7 +293,7 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - 같은 원본 브랜치에서의 복사(브랜치·복구 지점)는 직전 복사가 **끝난 시각**부터 `minCopyInterval`이 지나야 한다. 어기면 429와 남은 시간. 복구 지점에서 브랜치를 만드는 복사는 원본 DB에 체크포인트를 걸지 않으므로 이 제한을 받지 않는다.
 - 볼륨 사용률(statfs 기준) 90% 초과 시 복사 작업은 507.
 - 복구 지점 보존 정책(`maxPerBranch`, `maxAge`)은 복구 지점을 만들 때와 1시간마다 적용해 오래된 것부터 지운다.
-- 오류 본문은 `{error, code}`다(에이전트의 라우터가 직접 내는 301·404·405는 제외). `code`: `invalid`(400), `unauthorized`(401), `not-found`(404), `conflict`·`not-running`·`busy`(409), `rate-limited`(429, `Retry-After`), `reflink-unsupported`(501), `supervisor-unavailable`(502), `insufficient-storage`(507), `internal`(500).
+- 오류 본문은 `{error, code}`다(에이전트의 라우터가 직접 내는 3xx·404·405는 제외). `code`: `invalid`(400), `unauthorized`(401), `not-found`(404), `conflict`·`not-running`·`busy`(409), `rate-limited`(429, `Retry-After`), `reflink-unsupported`(501), `supervisor-unavailable`(502), `insufficient-storage`(507), `internal`(500).
 - 감독 프로세스는 `http://br-<브랜치>:8008`로 부른다. 브랜치 Service가 8008을 노출해야 한다.
 
 ### 7.3 브랜치 감독 프로세스 (`cmd/supervisor`, `internal/pgctl`)
@@ -454,7 +454,7 @@ consonance/
 └── docs/superpowers/specs/
 ```
 
-- Go 1.25 이상, 모듈 하나.
+- Go 1.27 이상(툴체인 go1.27.2), 모듈 하나.
 - Make 대상: `test`, `test-xfs`(VM), `images`, `deploy-dev`(k3s), `e2e`, `perf`.
 
 ## 14. 기본값

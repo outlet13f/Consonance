@@ -2,7 +2,7 @@
 # One-time setup of the Lima VM used for tests that need PostgreSQL 17 or XFS with reflink.
 set -euo pipefail
 VM=${VM:-consonance-poc}
-GO_VERSION=${GO_VERSION:-1.25.6}
+GO_VERSION=${GO_VERSION:-1.27.2}
 
 limactl start "$VM" >/dev/null 2>&1 || true
 limactl shell "$VM" -- sudo bash -euo pipefail -c "

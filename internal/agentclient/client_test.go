@@ -156,7 +156,8 @@ func TestClientReadsForeignErrorBodies(t *testing.T) {
 	}
 }
 
-// The agent's mux answers a "." or ".." segment with a 301 to the cleaned path. Following it
+// The agent's mux answers a "." or ".." segment with a redirect to the cleaned path (307 since
+// Go 1.27, 301 before). Following it
 // would turn DELETE /v1/branches/main/restore-points/. into GET /v1/branches/main/restore-points
 // and report success without deleting anything.
 func TestClientDoesNotFollowRedirects(t *testing.T) {
@@ -169,8 +170,8 @@ func TestClientDoesNotFollowRedirects(t *testing.T) {
 	} {
 		err := c.DeleteRestorePoint(context.Background(), "main", ".")
 		var apiErr *agentclient.APIError
-		if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusMovedPermanently {
-			t.Fatalf("%s: DeleteRestorePoint(main, \".\") = %v, want a 301 APIError", name, err)
+		if !errors.As(err, &apiErr) || apiErr.StatusCode < 300 || apiErr.StatusCode > 399 {
+			t.Fatalf("%s: DeleteRestorePoint(main, \".\") = %v, want a 3xx APIError", name, err)
 		}
 		if got := ops.Last(); got.Op != "" {
 			t.Fatalf("%s: the agent ran %+v", name, got)

@@ -29,8 +29,9 @@ type Client struct {
 // "http://volume-agent.cns-a1b2c3d4e5f6.svc:8443". A nil hc gets a client with a 60s timeout:
 // a copy takes about a second, after a lock wait of at most 2s and a backup start whose
 // checkpoint takes longer under write load. The client never follows redirects, whatever hc
-// says: the agent's mux answers a "." or ".." segment with a 301 to the cleaned path, and
-// following it turns a DELETE into a GET of another resource that reports success.
+// says: the agent's mux answers a "." or ".." segment with a redirect to the cleaned path, and
+// following it sends the request to another resource (after a 301 from a server built with Go
+// 1.25, a DELETE even became a GET that reported success).
 func New(baseURL, token string, hc *http.Client) *Client {
 	c := http.Client{Timeout: 60 * time.Second}
 	if hc != nil {
