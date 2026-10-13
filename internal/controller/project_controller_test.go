@@ -219,11 +219,14 @@ func TestAgentPodFollowsTheProjectSettings(t *testing.T) {
 		}
 		return ""
 	})
-	p := getProject(t, ns)
-	p.Spec.Limits.MinCopyInterval = metav1.Duration{Duration: time.Minute}
-	if err := kenv.Client.Update(ctx, &p); err != nil {
-		t.Fatal(err)
-	}
+	eventually(t, 10*time.Second, func() string { // the reconciler writes the Project too
+		p := getProject(t, ns)
+		p.Spec.Limits.MinCopyInterval = metav1.Duration{Duration: time.Minute}
+		if err := kenv.Client.Update(ctx, &p); err != nil {
+			return err.Error()
+		}
+		return ""
+	})
 	eventually(t, 10*time.Second, func() string {
 		if !slices.Contains(podArgs(), "--min-copy-interval=1m0s") {
 			return fmt.Sprintf("args %q", podArgs())
