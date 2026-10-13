@@ -302,9 +302,9 @@ func TestARestoreWaitsForASlowStart(t *testing.T) {
 func TestABackupBranchComesOnlyAfterItsDataMoved(t *testing.T) {
 	ns, fp := runningDev(t)
 	fp.addRestorePoint(testRP, "dev")
-	const failures = 6
+	const failures = 4
 	noAnswer := agentErr(502, agentapi.CodeSupervisorUnavailable, "no answer")
-	fp.failNext("DetachGeneration", noAnswer, noAnswer, noAnswer, noAnswer, noAnswer, noAnswer)
+	fp.failNext("DetachGeneration", noAnswer, noAnswer, noAnswer, noAnswer)
 	requestRestore(t, ns, "dev", "r1", v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP})
 	var backup string
 	eventually(t, 15*time.Second, func() string {
@@ -353,5 +353,36 @@ func TestDeletingABranchMidRollbackKeepsTheMovedData(t *testing.T) {
 	}
 	if _, _, ok := fp.generations(backup); !ok {
 		t.Error("the backup's data went")
+	}
+}
+
+// A branch deleted before its rollback moved the replaced data away takes that data with it: no
+// backup branch is made for data that is not there.
+func TestDeletingABranchBeforeItsRollbackMovedTheDataMakesNoBackup(t *testing.T) {
+	ns, fp := runningDev(t)
+	fp.addRestorePoint(testRP, "dev")
+	noAnswer := agentErr(502, agentapi.CodeSupervisorUnavailable, "no answer")
+	fp.failNext("DetachGeneration", noAnswer, noAnswer, noAnswer, noAnswer)
+	requestRestore(t, ns, "dev", "r1", v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP})
+	var backup string
+	eventually(t, 15*time.Second, func() string {
+		lr := getBranch(t, ns, "dev").Status.LastRestore
+		if lr == nil || lr.Phase != v1alpha1.RestoreDetaching || lr.BackupBranch == "" {
+			return fmt.Sprintf("lastRestore %+v", lr)
+		}
+		backup = lr.BackupBranch
+		return ""
+	})
+	deleteBranch(t, ns, "dev")
+	waitGone(t, ns, "dev", &v1alpha1.Branch{})
+	if _, _, ok := fp.generations(backup); ok {
+		t.Fatalf("the data moved before dev was deleted, so this run proves nothing: %q", fp.callLog())
+	}
+	var list v1alpha1.BranchList
+	if err := kenv.Client.List(context.Background(), &list, client.InNamespace(ns), client.MatchingLabels{LabelBackupOf: "dev"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 0 {
+		t.Errorf("a backup branch was made for data that never moved: %s", list.Items[0].Name)
 	}
 }
