@@ -120,6 +120,14 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	id, _ := ProjectID(b.Namespace)
 	ctx = logf.IntoContext(ctx, logf.FromContext(ctx).WithValues("projectId", id, "branch", b.Name))
 
+	if !b.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, &b)
+	}
+	if controllerutil.AddFinalizer(&b, BranchFinalizer) {
+		if err := r.Update(ctx, &b); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	if d := r.heldOff(req.NamespacedName); d > 0 {
 		return ctrl.Result{RequeueAfter: d}, nil
 	}

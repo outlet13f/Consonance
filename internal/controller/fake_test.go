@@ -288,6 +288,10 @@ func (a *fakeAgent) DeleteBranchData(_ context.Context, name string) error {
 	if name == agentapi.MainBranch {
 		return agentErr(http.StatusConflict, agentapi.CodeConflict, "main cannot be deleted")
 	}
+	// Like the agent: a supervisor that answers must report PostgreSQL stopped.
+	if pg, err := p.up(name); err == nil && pg.state != supervisorapi.PGStopped {
+		return agentErr(http.StatusConflict, agentapi.CodeConflict, "branch "+name+" is "+string(pg.state))
+	}
 	delete(p.data, name)
 	for id, b := range p.restorePoints {
 		if b == name {
