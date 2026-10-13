@@ -76,6 +76,9 @@ func startManager(e *kubetest.Env) (stop func(), err error) {
 	if err := (&ProjectReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Connector: conn, AgentImage: testAgentImage}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
+	if err := (&BranchReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Connector: conn, PostgresImage: testPostgresImage}).SetupWithManager(mgr); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- mgr.Start(ctx) }()
