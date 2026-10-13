@@ -154,6 +154,17 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return res, err
 }
 
+// saveStatus writes b's status now. It sends a copy, so b's status, and the pointers into it a
+// restore holds, stay the ones in memory; only the resource version is taken back.
+func (r *BranchReconciler) saveStatus(ctx context.Context, b *v1alpha1.Branch) error {
+	c := b.DeepCopy()
+	if err := r.Status().Update(ctx, c); err != nil {
+		return err
+	}
+	b.ResourceVersion = c.ResourceVersion
+	return nil
+}
+
 // token is the project's internal token, which the Project reconcile made.
 func (r *BranchReconciler) token(ctx context.Context, ns string) (string, error) {
 	var s corev1.Secret
@@ -190,6 +201,14 @@ func (r *BranchReconciler) reconcile(ctx context.Context, p *v1alpha1.Project, b
 	b.Status.Endpoint = branchEndpoint(b)
 	if ready, err := r.ensurePod(ctx, p, b); !ready || err != nil {
 		return ctrl.Result{}, err // a pod being replaced: its deletion brings the branch back
+	}
+
+	// Step 4 (spec 9.4): a rollback or reset takes over while one is open; the state follows.
+	if restorePending(b) {
+		res, err := r.restore(ctx, b, agent, sup)
+		if err != nil || restorePending(b) {
+			return res, err
+		}
 	}
 
 	// Step 3: the state.
