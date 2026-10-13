@@ -116,3 +116,78 @@ func TestAFailedBranchCanBeDeleted(t *testing.T) {
 	deleteBranch(t, ns, "lost")
 	waitGone(t, ns, "lost", &v1alpha1.Branch{})
 }
+
+// The data goes only once the pod object is gone: a terminating pod may still run PostgreSQL,
+// and the agent takes a supervisor that does not answer for "no pod".
+func TestDeletingABranchWaitsForItsPodToGo(t *testing.T) {
+	ns, fp := readyProject(t)
+	createBranch(t, ns, "dev", "main")
+	waitPhase(t, ns, "dev", v1alpha1.BranchRunning)
+	ctx := context.Background()
+	key := client.ObjectKey{Namespace: ns, Name: BranchObjectName("dev")}
+	setPodFinalizers := func(finalizers []string) {
+		t.Helper()
+		eventually(t, 10*time.Second, func() string {
+			var pod corev1.Pod
+			if err := kenv.Client.Get(ctx, key, &pod); err != nil {
+				return err.Error()
+			}
+			pod.Finalizers = finalizers
+			if err := kenv.Client.Update(ctx, &pod); err != nil {
+				return err.Error()
+			}
+			return ""
+		})
+	}
+	setPodFinalizers([]string{"test.consonance.io/hold"}) // keeps the pod terminating
+	deleteBranch(t, ns, "dev")
+	eventually(t, 10*time.Second, func() string {
+		var pod corev1.Pod
+		if err := kenv.Client.Get(ctx, key, &pod); err != nil {
+			return err.Error()
+		}
+		if pod.DeletionTimestamp == nil {
+			return "the pod is not being deleted"
+		}
+		return ""
+	})
+	time.Sleep(waitShort + 500*time.Millisecond) // a finalize pass that did not wait has run by now
+	if slices.Contains(fp.callLog(), "DeleteBranchData(dev)") {
+		t.Errorf("data deleted while the pod object still exists: %q", fp.callLog())
+	}
+	if b := getBranch(t, ns, "dev"); b.Status.Phase != v1alpha1.BranchDeleting {
+		t.Errorf("dev is %s", b.Status.Phase)
+	}
+	setPodFinalizers(nil)
+	waitGone(t, ns, "dev", &v1alpha1.Branch{})
+	if !slices.Contains(fp.callLog(), "DeleteBranchData(dev)") {
+		t.Errorf("calls %q", fp.callLog())
+	}
+}
+
+// A project whose agent never passed the reflink check has no branch data: deleting a branch
+// neither calls nor waits for the agent.
+func TestDeletingABranchOfAProjectWithoutReflinkLeavesTheAgentAlone(t *testing.T) {
+	ns, fp := createProject(t, func(fp *fakeProject) {
+		fp.setPreflight(agentapi.Preflight{Reflink: false, Kernel: "6.8.0", Error: "reflink copies are not supported here: operation not supported"})
+	})
+	bindVolume(t, ns)
+	eventually(t, 10*time.Second, func() string {
+		if p := getProject(t, ns); p.Status.Phase != v1alpha1.ProjectFailed {
+			return "phase " + string(p.Status.Phase)
+		}
+		return ""
+	})
+	createBranch(t, ns, "dev", "main")
+	eventually(t, 10*time.Second, func() string {
+		if b := getBranch(t, ns, "dev"); !slices.Contains(b.Finalizers, BranchFinalizer) {
+			return fmt.Sprintf("finalizers %q", b.Finalizers)
+		}
+		return ""
+	})
+	deleteBranch(t, ns, "dev")
+	waitGone(t, ns, "dev", &v1alpha1.Branch{})
+	if slices.Contains(fp.callLog(), "DeleteBranchData(dev)") {
+		t.Errorf("the agent was called for a project without reflink: %q", fp.callLog())
+	}
+}
