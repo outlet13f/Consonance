@@ -97,3 +97,32 @@ func TestFakeSupervisorFollowsItsPod(t *testing.T) {
 		t.Fatal("not bootstrapped")
 	}
 }
+
+// The fake agent asks a branch's supervisor before it moves, deletes or copies from a generation,
+// as the real one does: no pod is a supervisor that does not answer (502).
+func TestFakeAgentAsksTheSupervisor(t *testing.T) {
+	ctx := context.Background()
+	conn := newFakeConnector(fake.NewClientBuilder().Build())
+	agent := conn.Agent("cns-x", "tok")
+	if _, err := agent.InitMain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p := conn.project("cns-x")
+	p.mu.Lock()
+	p.data["main"].gens = append(p.data["main"].gens, 2) // a second, non-current generation
+	p.mu.Unlock()
+	if _, err := agent.DetachGeneration(ctx, "main", 2, agentapi.DetachRequest{AsRestorePoint: true}); agentCode(err) != agentapi.CodeSupervisorUnavailable {
+		t.Errorf("detach without a pod: %v, want supervisor-unavailable", err)
+	}
+	if err := agent.DeleteGeneration(ctx, "main", 2); agentCode(err) != agentapi.CodeSupervisorUnavailable {
+		t.Errorf("delete a generation without a pod: %v, want supervisor-unavailable", err)
+	}
+	req := agentapi.CreateBranchDataRequest{Parent: "main", Source: agentapi.Source{Type: agentapi.SourceParentLatest}}
+	if _, err := agent.CreateBranchData(ctx, "dev", req); agentCode(err) != agentapi.CodeSupervisorUnavailable {
+		t.Errorf("copy from a parent without a pod: %v, want supervisor-unavailable", err)
+	}
+	gen := agentapi.CreateGenerationRequest{Parent: "nodata", Source: agentapi.Source{Type: agentapi.SourceParentLatest}}
+	if _, err := agent.CreateGeneration(ctx, "main", gen); agentCode(err) != agentapi.CodeNotFound {
+		t.Errorf("reset from a parent without data: %v, want not-found", err)
+	}
+}

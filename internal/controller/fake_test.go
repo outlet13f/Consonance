@@ -261,7 +261,11 @@ func (a *fakeAgent) CreateBranchData(_ context.Context, name string, req agentap
 		if p.data[req.Parent] == nil {
 			return agentapi.BranchData{}, agentErr(http.StatusNotFound, agentapi.CodeNotFound, "parent has no data")
 		}
-		if pg := p.pg[req.Parent]; pg == nil || pg.state != supervisorapi.PGRunning {
+		pg, err := p.up(req.Parent)
+		if err != nil {
+			return agentapi.BranchData{}, agentErr(http.StatusBadGateway, agentapi.CodeSupervisorUnavailable, err.Error())
+		}
+		if pg.state != supervisorapi.PGRunning {
 			return agentapi.BranchData{}, agentErr(http.StatusConflict, agentapi.CodeNotRunning, "parent is not running")
 		}
 		lsn = "0/3000028"
@@ -324,7 +328,14 @@ func (a *fakeAgent) CreateGeneration(_ context.Context, branch string, req agent
 			return agentapi.Generation{}, agentErr(http.StatusNotFound, agentapi.CodeNotFound, "no such restore point")
 		}
 	case agentapi.SourceParentLatest:
-		if pg := p.pg[req.Parent]; p.data[req.Parent] == nil || pg == nil || pg.state != supervisorapi.PGRunning {
+		if p.data[req.Parent] == nil {
+			return agentapi.Generation{}, agentErr(http.StatusNotFound, agentapi.CodeNotFound, "parent has no data")
+		}
+		pg, err := p.up(req.Parent)
+		if err != nil {
+			return agentapi.Generation{}, agentErr(http.StatusBadGateway, agentapi.CodeSupervisorUnavailable, err.Error())
+		}
+		if pg.state != supervisorapi.PGRunning {
 			return agentapi.Generation{}, agentErr(http.StatusConflict, agentapi.CodeNotRunning, "parent is not running")
 		}
 	}
@@ -382,7 +393,11 @@ func (a *fakeAgent) DetachGeneration(_ context.Context, branch string, n int, re
 	if n == d.current {
 		return agentapi.DetachResponse{}, agentErr(http.StatusConflict, agentapi.CodeConflict, "the current generation")
 	}
-	if pg := p.pg[branch]; pg != nil && pg.state != supervisorapi.PGStopped && pg.gen == n {
+	pg, err := p.up(branch)
+	if err != nil {
+		return agentapi.DetachResponse{}, agentErr(http.StatusBadGateway, agentapi.CodeSupervisorUnavailable, err.Error())
+	}
+	if pg.state != supervisorapi.PGStopped && pg.gen == n {
 		return agentapi.DetachResponse{}, agentErr(http.StatusConflict, agentapi.CodeConflict, "postgres runs it")
 	}
 	if req.ToBranch != "" && p.data[req.ToBranch] != nil {
@@ -413,7 +428,11 @@ func (a *fakeAgent) DeleteGeneration(_ context.Context, branch string, n int) er
 	if n == d.current {
 		return agentErr(http.StatusConflict, agentapi.CodeConflict, "the current generation")
 	}
-	if pg := p.pg[branch]; pg != nil && pg.state != supervisorapi.PGStopped && pg.gen == n {
+	pg, err := p.up(branch)
+	if err != nil {
+		return agentErr(http.StatusBadGateway, agentapi.CodeSupervisorUnavailable, err.Error())
+	}
+	if pg.state != supervisorapi.PGStopped && pg.gen == n {
 		return agentErr(http.StatusConflict, agentapi.CodeConflict, "postgres runs it")
 	}
 	d.gens = slices.DeleteFunc(d.gens, func(g int) bool { return g == n })
