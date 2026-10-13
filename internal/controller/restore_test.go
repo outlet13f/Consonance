@@ -219,3 +219,108 @@ func TestEachRequestRunsOnce(t *testing.T) {
 	// A stopped branch is started to check the restored data, then stopped again.
 	waitPhase(t, ns, "dev", v1alpha1.BranchStopped)
 }
+
+// A request that comes while another runs waits until that one is done (spec 9.4): each keeps
+// what it replaced.
+func TestANewRequestWaitsForTheOpenOne(t *testing.T) {
+	ns, fp := runningDev(t)
+	fp.addRestorePoint(testRP, "dev")
+	rp := v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP}
+	slow := supervisorErr(503, "postgres is still starting")
+	fp.failNext("Start(dev)", slow, slow, slow, slow, slow, slow) // holds r1 in Starting for about 3s
+	requestRestore(t, ns, "dev", "r1", rp)
+	eventually(t, 15*time.Second, func() string {
+		if lr := getBranch(t, ns, "dev").Status.LastRestore; lr == nil || lr.Phase != v1alpha1.RestoreStarting {
+			return fmt.Sprintf("lastRestore %+v", lr)
+		}
+		return ""
+	})
+	requestRestore(t, ns, "dev", "r2", rp)
+	b := waitRestore(t, ns, "dev", "r2", v1alpha1.RestoreDone)
+	if lr := b.Status.LastRestore; lr.FromGeneration != 2 || lr.ToGeneration != 3 {
+		t.Errorf("r2 %+v", lr)
+	}
+	// r1 kept data-1 as its backup before r2 began; r2 kept data-2.
+	if cur, gens, _ := fp.generations("dev"); cur != 3 || !slices.Equal(gens, []int{3}) {
+		t.Errorf("dev on the volume: current %d of %v", cur, gens)
+	}
+	calls := fp.callLog()
+	detach1 := slices.IndexFunc(calls, func(c string) bool { return strings.HasPrefix(c, "DetachGeneration(dev,1,") })
+	second := -1
+	if first := slices.Index(calls, "CreateGeneration(dev,RestorePoint)"); first >= 0 {
+		if i := slices.Index(calls[first+1:], "CreateGeneration(dev,RestorePoint)"); i >= 0 {
+			second = first + 1 + i
+		}
+	}
+	if detach1 < 0 || second < 0 || detach1 > second {
+		t.Errorf("r2 began before r1 was done: %q", calls)
+	}
+}
+
+// Generations below the current one may hold a user's data from before an earlier restore
+// (spec 9.4): a restore deletes only the ones above.
+func TestARestoreLeavesOlderGenerationsAlone(t *testing.T) {
+	ns, fp := runningDev(t)
+	fp.addRestorePoint(testRP, "dev")
+	rp := v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP}
+	// r1's detach finds nothing to move, so data-1 stays below the current generation.
+	fp.failNext("DetachGeneration", agentErr(404, agentapi.CodeNotFound, "no such generation"))
+	requestRestore(t, ns, "dev", "r1", rp)
+	waitRestore(t, ns, "dev", "r1", v1alpha1.RestoreDone)
+	if cur, gens, _ := fp.generations("dev"); cur != 2 || !slices.Equal(gens, []int{1, 2}) {
+		t.Fatalf("dev on the volume: current %d of %v", cur, gens)
+	}
+	requestRestore(t, ns, "dev", "r2", rp)
+	waitRestore(t, ns, "dev", "r2", v1alpha1.RestoreDone)
+	if cur, gens, _ := fp.generations("dev"); cur != 3 || !slices.Equal(gens, []int{1, 3}) {
+		t.Errorf("dev on the volume: current %d of %v", cur, gens)
+	}
+	if slices.Contains(fp.callLog(), "DeleteGeneration(dev,1)") {
+		t.Errorf("calls %q", fp.callLog())
+	}
+}
+
+// A start that answers 503 is still under way (carry-over from plan 1): the restore waits for it
+// and does not go back.
+func TestARestoreWaitsForASlowStart(t *testing.T) {
+	ns, fp := runningDev(t)
+	fp.addRestorePoint(testRP, "dev")
+	slow := supervisorErr(503, "postgres is still starting")
+	fp.failNext("Start(dev)", slow, slow)
+	requestRestore(t, ns, "dev", "r1", v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP})
+	b := waitRestore(t, ns, "dev", "r1", v1alpha1.RestoreDone)
+	if b.Status.LastRestore.Reverting || slices.Contains(fp.callLog(), "ActivateGeneration(dev,1)") {
+		t.Errorf("a slow start was taken for a failed one: %+v %q", b.Status.LastRestore, fp.callLog())
+	}
+	if n := countCalls(fp, "Start(dev)"); n < 3 {
+		t.Errorf("%d starts", n)
+	}
+}
+
+// The backup branch is made only once its data is moved (carry-over from plan 2): made earlier,
+// its own reconcile would copy the branch's new data into the name the old data is moving to.
+func TestABackupBranchComesOnlyAfterItsDataMoved(t *testing.T) {
+	ns, fp := runningDev(t)
+	fp.addRestorePoint(testRP, "dev")
+	const failures = 6
+	noAnswer := agentErr(502, agentapi.CodeSupervisorUnavailable, "no answer")
+	fp.failNext("DetachGeneration", noAnswer, noAnswer, noAnswer, noAnswer, noAnswer, noAnswer)
+	requestRestore(t, ns, "dev", "r1", v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP})
+	var backup string
+	eventually(t, 15*time.Second, func() string {
+		lr := getBranch(t, ns, "dev").Status.LastRestore
+		if lr == nil || lr.Phase != v1alpha1.RestoreDetaching || lr.BackupBranch == "" {
+			return fmt.Sprintf("lastRestore %+v", lr)
+		}
+		backup = lr.BackupBranch
+		return ""
+	})
+	var b v1alpha1.Branch
+	err := kenv.Client.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: backup}, &b)
+	// Read the count after the Get: while every detach so far failed, no data has moved.
+	if err == nil && countCalls(fp, "DetachGeneration") <= failures {
+		t.Errorf("backup branch %s exists while its data has not moved", backup)
+	}
+	waitRestore(t, ns, "dev", "r1", v1alpha1.RestoreDone)
+	waitPhase(t, ns, backup, v1alpha1.BranchStopped)
+}
