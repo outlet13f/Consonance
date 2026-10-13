@@ -13,6 +13,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"consonance/api/v1alpha1"
+	"consonance/internal/agentapi"
 )
 
 // finalize deletes a branch (spec 7.1 step 5, 9.6): its service and pod, then, once the pod
@@ -58,6 +59,9 @@ func (r *BranchReconciler) finalize(ctx context.Context, b *v1alpha1.Branch) (ct
 			return ctrl.Result{}, err
 		}
 		agent := r.Connector.Agent(b.Namespace, token)
+		if err := r.keepMovedBackup(ctx, b, agent); err != nil {
+			return retryLater(err)
+		}
 		if _, err := call(ctx, callTimeout, func(ctx context.Context) (struct{}, error) {
 			return struct{}{}, agent.DeleteBranchData(ctx, b.Name) // a branch without data: success
 		}); err != nil {
@@ -90,4 +94,25 @@ func (r *BranchReconciler) dataToDelete(ctx context.Context, b *v1alpha1.Branch)
 		return false, nil
 	}
 	return true, nil
+}
+
+// keepMovedBackup makes the backup branch of a rollback that was moving the replaced data away
+// when the branch was deleted (spec 9.4 Detaching). Data the agent moved already would be left
+// with no Branch; data not moved yet goes with the branch. Finishing the detach instead would
+// need the branch's supervisor, whose pod is gone by now.
+func (r *BranchReconciler) keepMovedBackup(ctx context.Context, b *v1alpha1.Branch, agent AgentAPI) error {
+	lr := b.Status.LastRestore
+	if lr == nil || lr.Phase != v1alpha1.RestoreDetaching || lr.BackupBranch == "" {
+		return nil
+	}
+	_, err := call(ctx, callTimeout, func(ctx context.Context) (agentapi.Generations, error) {
+		return agent.ListGenerations(ctx, lr.BackupBranch)
+	})
+	if agentCode(err) == agentapi.CodeNotFound {
+		return nil // not moved
+	}
+	if err != nil {
+		return err
+	}
+	return r.ensureBackupBranch(ctx, b, lr.BackupBranch)
 }

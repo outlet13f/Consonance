@@ -42,7 +42,7 @@ func (c *fakeConnector) project(ns string) *fakeProject {
 			preflight: agentapi.Preflight{Reflink: true, Kernel: "6.8.0"},
 			data:      map[string]*fakeData{}, pg: map[string]*fakePG{},
 			restorePoints: map[string]string{}, resetPoints: map[string]string{},
-			failures: map[string][]error{}, badGenerations: map[string]int{}, tokens: map[string]bool{},
+			failures: map[string][]error{}, lost: map[string]error{}, badGenerations: map[string]int{}, tokens: map[string]bool{},
 		}
 		c.projects[ns] = p
 	}
@@ -69,6 +69,7 @@ type fakeProject struct {
 	restorePoints  map[string]string    // restore point ID → branch
 	resetPoints    map[string]string    // "branch/n" → the restore point a reset made of data-n
 	failures       map[string][]error   // operation → errors for its next calls, in order
+	lost           map[string]error     // operation → the error its calls answer with after doing their work
 	badGenerations map[string]int       // branch → a generation PostgreSQL does not start on
 	tokens         map[string]bool
 	calls          []string
@@ -92,6 +93,14 @@ func (p *fakeProject) failNext(op string, errs ...error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.failures[op] = append(p.failures[op], errs...)
+}
+
+// loseAnswers makes the calls of an operation do their work and then fail with err, as an answer
+// lost on its way back does, until it is called again with nil. Only DetachGeneration heeds it.
+func (p *fakeProject) loseAnswers(op string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lost[op] = err
 }
 
 func (p *fakeProject) setPreflight(pre agentapi.Preflight) {
@@ -373,7 +382,17 @@ func (a *fakeAgent) ActivateGeneration(_ context.Context, branch string, n int) 
 	return agentapi.Generations{Current: d.current, Generations: slices.Clone(d.gens)}, nil
 }
 
-func (a *fakeAgent) DetachGeneration(_ context.Context, branch string, n int, req agentapi.DetachRequest) (agentapi.DetachResponse, error) {
+func (a *fakeAgent) DetachGeneration(ctx context.Context, branch string, n int, req agentapi.DetachRequest) (agentapi.DetachResponse, error) {
+	resp, err := a.detachGeneration(ctx, branch, n, req)
+	a.p.mu.Lock()
+	defer a.p.mu.Unlock()
+	if lost := a.p.lost["DetachGeneration"]; err == nil && lost != nil {
+		return agentapi.DetachResponse{}, lost
+	}
+	return resp, err
+}
+
+func (a *fakeAgent) detachGeneration(_ context.Context, branch string, n int, req agentapi.DetachRequest) (agentapi.DetachResponse, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()

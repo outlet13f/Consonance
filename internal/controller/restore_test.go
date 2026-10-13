@@ -324,3 +324,34 @@ func TestABackupBranchComesOnlyAfterItsDataMoved(t *testing.T) {
 	waitRestore(t, ns, "dev", "r1", v1alpha1.RestoreDone)
 	waitPhase(t, ns, backup, v1alpha1.BranchStopped)
 }
+
+// A branch deleted while its rollback moves the replaced data away still gets its backup branch:
+// data the agent moved must not be left without a Branch.
+func TestDeletingABranchMidRollbackKeepsTheMovedData(t *testing.T) {
+	ns, fp := runningDev(t)
+	fp.addRestorePoint(testRP, "dev")
+	// Each detach moves the data, but its answer never comes back: the restore stays in Detaching.
+	fp.loseAnswers("DetachGeneration", agentErr(502, agentapi.CodeSupervisorUnavailable, "no answer"))
+	requestRestore(t, ns, "dev", "r1", v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP})
+	var backup string
+	eventually(t, 15*time.Second, func() string {
+		lr := getBranch(t, ns, "dev").Status.LastRestore
+		if lr == nil || lr.Phase != v1alpha1.RestoreDetaching || lr.BackupBranch == "" {
+			return fmt.Sprintf("lastRestore %+v", lr)
+		}
+		if _, _, ok := fp.generations(lr.BackupBranch); !ok {
+			return "the data has not moved yet"
+		}
+		backup = lr.BackupBranch
+		return ""
+	})
+	deleteBranch(t, ns, "dev")
+	waitGone(t, ns, "dev", &v1alpha1.Branch{})
+	b := waitPhase(t, ns, backup, v1alpha1.BranchStopped)
+	if b.Labels[LabelBackupOf] != "dev" {
+		t.Errorf("labels %v", b.Labels)
+	}
+	if _, _, ok := fp.generations(backup); !ok {
+		t.Error("the backup's data went")
+	}
+}
