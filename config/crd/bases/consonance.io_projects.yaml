@@ -92,6 +92,7 @@ spec:
                     default: 5s
                     description: MinCopyInterval is the shortest time between two
                       copies of one source branch.
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
                     type: string
                 type: object
               postgresVersion:
@@ -106,6 +107,7 @@ spec:
                 properties:
                   maxAge:
                     default: 24h
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
                     type: string
                   maxPerBranch:
                     default: 20

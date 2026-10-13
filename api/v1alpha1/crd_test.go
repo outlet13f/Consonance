@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"consonance/api/v1alpha1"
@@ -90,6 +91,52 @@ func TestProjectMustBeNamedProject(t *testing.T) {
 	}
 	if err := env.Client.Create(context.Background(), p); !apierrors.IsInvalid(err) {
 		t.Fatalf("create Project named other: %v, want Invalid", err)
+	}
+}
+
+// A Duration field the API server accepts but time.ParseDuration refuses would make every typed
+// List of Projects fail, so the CRD allows only the format ParseDuration reads. The objects are
+// unstructured because a typed client cannot send a malformed duration.
+func TestProjectRefusesMalformedDurations(t *testing.T) {
+	kubetest.Need(t, env)
+	cases := []struct {
+		name  string
+		spec  map[string]any
+		valid bool
+	}{
+		{"a minCopyInterval that is not a duration", map[string]any{"limits": map[string]any{"minCopyInterval": "abc"}}, false},
+		{"a negative maxAge", map[string]any{"restorePoints": map[string]any{"maxAge": "-1h"}}, false},
+		{"a minCopyInterval of 1m30s", map[string]any{"limits": map[string]any{"minCopyInterval": "1m30s"}}, true},
+		{"a maxAge of 24h0m0s", map[string]any{"restorePoints": map[string]any{"maxAge": "24h0m0s"}}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ns := env.Namespace(t)
+			spec := map[string]any{"displayName": "my-app"}
+			for k, v := range c.spec {
+				spec[k] = v
+			}
+			p := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": v1alpha1.GroupVersion.String(),
+				"kind":       "Project",
+				"metadata":   map[string]any{"name": "project", "namespace": ns},
+				"spec":       spec,
+			}}
+			err := env.Client.Create(context.Background(), p)
+			if c.valid && err != nil {
+				t.Fatalf("create: %v, want success", err)
+			}
+			if !c.valid && !apierrors.IsInvalid(err) {
+				t.Fatalf("create: %v, want Invalid", err)
+			}
+			if c.valid {
+				// The typed List the operator's cache makes must read what the server stored.
+				var list v1alpha1.ProjectList
+				if err := env.Client.List(context.Background(), &list, client.InNamespace(ns)); err != nil {
+					t.Fatalf("typed list: %v", err)
+				}
+			}
+		})
 	}
 }
 

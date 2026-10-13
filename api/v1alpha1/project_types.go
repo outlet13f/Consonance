@@ -61,6 +61,8 @@ type ProjectLimits struct {
 	// MinCopyInterval is the shortest time between two copies of one source branch.
 	// +optional
 	// +kubebuilder:default="5s"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$`
 	MinCopyInterval metav1.Duration `json:"minCopyInterval,omitzero"`
 }
 
@@ -73,6 +75,8 @@ type RestorePointPolicy struct {
 
 	// +optional
 	// +kubebuilder:default="24h"
+	// +kubebuilder:validation:Type=string
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$`
 	MaxAge metav1.Duration `json:"maxAge,omitzero"`
 }
 
