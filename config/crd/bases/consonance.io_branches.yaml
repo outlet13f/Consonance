@@ -1,0 +1,333 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: branches.consonance.io
+spec:
+  group: consonance.io
+  names:
+    kind: Branch
+    listKind: BranchList
+    plural: branches
+    singular: branch
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.parent
+      name: Parent
+      type: string
+    - jsonPath: .spec.state
+      name: State
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Branch is one branch of a project: a PostgreSQL data directory on the project volume and a
+          pod that runs it (spec 4.3).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: BranchSpec is the branch the API server asks for (spec 4.3).
+            properties:
+              compute:
+                description: Compute overrides the project's defaultCompute.
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - cpu
+                - memory
+                type: object
+              parent:
+                description: Parent is the branch this one was copied from. main has
+                  none.
+                maxLength: 40
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
+              protected:
+                description: |-
+                  Protected marks main and other branches that need approval to change (spec 1). The API
+                  server enforces it.
+                type: boolean
+              restore:
+                description: |-
+                  Restore asks for a rollback (source RestorePoint) or a reset (source ParentLatest). The
+                  operator carries out each requestId once (spec 9.4).
+                properties:
+                  requestId:
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  source:
+                    description: BranchSource is where a branch's data, or the data
+                      of a rollback or reset, comes from.
+                    properties:
+                      restorePointId:
+                        pattern: ^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$
+                        type: string
+                      type:
+                        default: ParentLatest
+                        description: SourceType says what a branch's data is copied
+                          from (spec 4.3).
+                        enum:
+                        - ParentLatest
+                        - RestorePoint
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: a RestorePoint source needs restorePointId
+                      rule: self.type != 'RestorePoint' || has(self.restorePointId)
+                required:
+                - requestId
+                - source
+                type: object
+              source:
+                default:
+                  type: ParentLatest
+                description: BranchSource is where a branch's data, or the data of
+                  a rollback or reset, comes from.
+                properties:
+                  restorePointId:
+                    pattern: ^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$
+                    type: string
+                  type:
+                    default: ParentLatest
+                    description: SourceType says what a branch's data is copied from
+                      (spec 4.3).
+                    enum:
+                    - ParentLatest
+                    - RestorePoint
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: a RestorePoint source needs restorePointId
+                  rule: self.type != 'RestorePoint' || has(self.restorePointId)
+              state:
+                default: Running
+                description: DesiredState is the PostgreSQL process state a branch
+                  should be in (spec 4.3).
+                enum:
+                - Running
+                - Stopped
+                type: string
+            type: object
+            x-kubernetes-validations:
+            - message: parent is immutable
+              rule: has(self.parent) == has(oldSelf.parent) && (!has(self.parent)
+                || self.parent == oldSelf.parent)
+            - message: source is immutable
+              rule: self.source == oldSelf.source
+          status:
+            description: BranchStatus is what the operator reports (spec 4.3).
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              createdFrom:
+                description: CreatedFrom is where a branch's data came from.
+                properties:
+                  backupStartLSN:
+                    description: |-
+                      BackupStartLSN is the start of the backup the copy was made in. It is empty when the
+                      copy came from a restore point, or when a retried request found the data made already.
+                    type: string
+                  branch:
+                    type: string
+                  restorePointId:
+                    type: string
+                type: object
+              dataGeneration:
+                description: DataGeneration is the data-N directory the branch runs
+                  on.
+                format: int32
+                type: integer
+              endpoint:
+                description: Endpoint is where clients reach the branch's PostgreSQL.
+                properties:
+                  host:
+                    type: string
+                  port:
+                    format: int32
+                    type: integer
+                required:
+                - host
+                - port
+                type: object
+              lastRestore:
+                description: |-
+                  RestoreStatus is the last rollback or reset (spec 4.3). Source, the generations, Reverting and
+                  the times are not in the spec: the operator keeps them to resume after a restart (spec 10).
+                properties:
+                  backupBranch:
+                    description: BackupBranch holds the generation a rollback replaced.
+                    type: string
+                  finishedAt:
+                    format: date-time
+                    type: string
+                  fromGeneration:
+                    description: FromGeneration is the generation the branch ran before.
+                    format: int32
+                    type: integer
+                  message:
+                    type: string
+                  phase:
+                    description: RestorePhase is the step a rollback or reset is at
+                      (spec 9.4).
+                    type: string
+                  requestId:
+                    type: string
+                  restorePointId:
+                    description: RestorePointID holds the generation a reset replaced.
+                    type: string
+                  reverting:
+                    description: |-
+                      Reverting is set when the new generation did not start and the branch goes back to
+                      FromGeneration.
+                    type: boolean
+                  source:
+                    description: BranchSource is where a branch's data, or the data
+                      of a rollback or reset, comes from.
+                    properties:
+                      restorePointId:
+                        pattern: ^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$
+                        type: string
+                      type:
+                        default: ParentLatest
+                        description: SourceType says what a branch's data is copied
+                          from (spec 4.3).
+                        enum:
+                        - ParentLatest
+                        - RestorePoint
+                        type: string
+                    type: object
+                    x-kubernetes-validations:
+                    - message: a RestorePoint source needs restorePointId
+                      rule: self.type != 'RestorePoint' || has(self.restorePointId)
+                  startedAt:
+                    format: date-time
+                    type: string
+                  toGeneration:
+                    description: ToGeneration is the new generation, once made.
+                    format: int32
+                    type: integer
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: BranchPhase is where a branch is (spec 4.3).
+                type: string
+              timings:
+                description: Timings are first-time marks of a branch's life.
+                properties:
+                  dataReadyAt:
+                    format: date-time
+                    type: string
+                  runningAt:
+                    format: date-time
+                    type: string
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: a branch name is a DNS-1123 label of at most 40 characters
+          rule: self.metadata.name.size() <= 40 && self.metadata.name.matches('^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
+        - message: main has no parent and every other branch has one
+          rule: 'self.metadata.name == ''main'' ? !has(self.spec.parent) : has(self.spec.parent)'
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,226 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: projects.consonance.io
+spec:
+  group: consonance.io
+  names:
+    kind: Project
+    listKind: ProjectList
+    plural: projects
+    singular: project
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Project is one project: its namespace cns-<projectId> holds this Project, named project, and
+          its branches (spec 4.1).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ProjectSpec is the project the API server asks for (spec 4.2). Omitted fields get the spec 14
+              defaults from the API server.
+            properties:
+              defaultCompute:
+                default:
+                  cpu: 500m
+                  memory: 1Gi
+                description: 'ComputeSpec is the CPU and memory of a branch pod: its
+                  requests and its limits.'
+                properties:
+                  cpu:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  memory:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - cpu
+                - memory
+                type: object
+              displayName:
+                maxLength: 100
+                minLength: 1
+                type: string
+              limits:
+                default: {}
+                description: ProjectLimits are the project's limits (spec 4.2).
+                properties:
+                  maxBranches:
+                    default: 10
+                    description: MaxBranches counts main. The API server enforces
+                      it.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  minCopyInterval:
+                    default: 5s
+                    description: MinCopyInterval is the shortest time between two
+                      copies of one source branch.
+                    type: string
+                type: object
+              postgresVersion:
+                default: "17"
+                enum:
+                - "17"
+                type: string
+              restorePoints:
+                default: {}
+                description: RestorePointPolicy is the restore point retention (spec
+                  4.2).
+                properties:
+                  maxAge:
+                    default: 24h
+                    type: string
+                  maxPerBranch:
+                    default: 20
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+              storage:
+                default: {}
+                description: StorageSpec is the project volume. It must be XFS with
+                  reflink (spec 2).
+                properties:
+                  size:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 10Gi
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                  storageClassName:
+                    type: string
+                type: object
+            required:
+            - displayName
+            type: object
+          status:
+            description: ProjectStatus is what the operator reports.
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: ProjectPhase is where a project is in its life (spec
+                  4.2).
+                type: string
+              volume:
+                description: VolumeStatus is the project volume as the agent last
+                  saw it.
+                properties:
+                  capacityBytes:
+                    format: int64
+                    type: integer
+                  pvcName:
+                    type: string
+                  usedBytes:
+                    format: int64
+                    type: integer
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: the Project of a project namespace is named project
+          rule: self.metadata.name == 'project'
+    served: true
+    storage: true
+    subresources:
+      status: {}
