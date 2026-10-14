@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -171,6 +172,64 @@ func TestOperatorReconcilesWithItsOwnPermissions(t *testing.T) {
 	if !strings.Contains(logs(), `"msg":"operator starting"`) {
 		t.Errorf("no JSON start log:\n%s", logs())
 	}
+
+	// The paths past this point, each under the operator's own role. What the agent and the
+	// supervisor would report is set by hand.
+	// An ended agent pod is deleted and made again (pods delete).
+	agentKey := client.ObjectKey{Namespace: ns, Name: controller.AgentName}
+	if err := env.Client.Get(ctx, agentKey, &pod); err != nil {
+		t.Fatal(err)
+	}
+	oldUID := pod.UID
+	pod.Status.Phase = corev1.PodFailed
+	if err := env.Client.Status().Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	wait("a new agent pod", func() bool {
+		var np corev1.Pod
+		return env.Client.Get(ctx, agentKey, &np) == nil && np.UID != oldUID
+	})
+	// A branch gets its finalizer (branches update) and, deleted, loses it once its service is
+	// deleted (services delete, branches/status update).
+	feature := &v1alpha1.Branch{ObjectMeta: metav1.ObjectMeta{Name: "feature", Namespace: ns}, Spec: v1alpha1.BranchSpec{Parent: v1alpha1.MainBranch}}
+	if err := env.Client.Create(ctx, feature); err != nil {
+		t.Fatal(err)
+	}
+	wait("the branch finalizer", func() bool {
+		var got v1alpha1.Branch
+		return env.Client.Get(ctx, client.ObjectKeyFromObject(feature), &got) == nil && slices.Contains(got.Finalizers, controller.BranchFinalizer)
+	})
+	if err := env.Client.Delete(ctx, feature); err != nil {
+		t.Fatal(err)
+	}
+	wait("the branch deleted", func() bool {
+		return apierrors.IsNotFound(env.Client.Get(ctx, client.ObjectKeyFromObject(feature), &v1alpha1.Branch{}))
+	})
+	// Once reflink is known to work, the project makes main (branches create).
+	wait("reflink marked supported", func() bool {
+		var got v1alpha1.Project
+		if env.Client.Get(ctx, client.ObjectKeyFromObject(p), &got) != nil {
+			return false
+		}
+		meta.SetStatusCondition(&got.Status.Conditions, metav1.Condition{Type: v1alpha1.ConditionReflinkSupported, Status: metav1.ConditionTrue, Reason: "Supported"})
+		return env.Client.Status().Update(ctx, &got) == nil
+	})
+	mainKey := client.ObjectKey{Namespace: ns, Name: v1alpha1.MainBranch}
+	wait("main made by the operator", func() bool { return env.Client.Get(ctx, mainKey, &v1alpha1.Branch{}) == nil })
+	// A branch with data makes its service and pod, which it owns (branches/finalizers update
+	// under owner-reference enforcement).
+	wait("main marked as having data", func() bool {
+		var got v1alpha1.Branch
+		if env.Client.Get(ctx, mainKey, &got) != nil {
+			return false
+		}
+		got.Status.DataGeneration = 1
+		return env.Client.Status().Update(ctx, &got) == nil
+	})
+	brKey := client.ObjectKey{Namespace: ns, Name: controller.BranchObjectName(v1alpha1.MainBranch)}
+	wait("main's service and pod", func() bool {
+		return env.Client.Get(ctx, brKey, &corev1.Service{}) == nil && env.Client.Get(ctx, brKey, &corev1.Pod{}) == nil
+	})
 
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)

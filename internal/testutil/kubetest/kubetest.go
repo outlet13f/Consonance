@@ -86,6 +86,9 @@ func Start() (*Env, error) {
 		ErrorIfCRDPathMissing: true,
 		Scheme:                scheme,
 	}
+	// Owner references that block deletion need the right to update the owner's finalizers, as
+	// on clusters that enforce it: tests that run as the operator then prove its role grants it.
+	env.ControlPlane.GetAPIServer().Configure().Append("enable-admission-plugins", "OwnerReferencesPermissionEnforcement")
 	cfg, err := env.Start()
 	if err != nil {
 		return nil, fmt.Errorf("start envtest: %w", err)

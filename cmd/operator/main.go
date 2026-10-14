@@ -48,7 +48,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&c.postgresImage, "postgres-image", "consonance/postgres:17-dev", "branch image (PostgreSQL and the supervisor)")
 	fs.StringVar(&c.metricsAddr, "metrics-bind-address", ":8080", "metrics listen address; 0 turns metrics off")
 	fs.StringVar(&c.probeAddr, "health-probe-bind-address", ":8081", "liveness and readiness listen address")
-	fs.StringVar(&c.kubeconfig, "kubeconfig", "", "kubeconfig file; empty means $KUBECONFIG, ~/.kube/config or in-cluster")
+	fs.StringVar(&c.kubeconfig, "kubeconfig", "", "kubeconfig file; empty means $KUBECONFIG, then in-cluster, then ~/.kube/config")
 	fs.BoolVar(&c.leaderElect, "leader-elect", false, "elect one leader among replicas")
 	if err := fs.Parse(args); err != nil {
 		return c, err
@@ -108,7 +108,8 @@ func run(args []string) error {
 		return err
 	}
 	slog.Info("operator starting", "agentImage", c.agentImage, "postgresImage", c.postgresImage)
-	// SIGTERM or SIGINT stops the manager, which lets running reconciles finish.
+	// SIGTERM or SIGINT stops the manager: it cancels the running reconciles and waits for them
+	// to return. A step cut short goes on from the status after the restart (spec 10).
 	return mgr.Start(ctrl.SetupSignalHandler())
 }
 
