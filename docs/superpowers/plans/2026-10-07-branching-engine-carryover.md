@@ -52,7 +52,7 @@ pgctl 부트스트랩:
 ### 계획 4(REST API 서버)가 반영할 것
 
 - main 리셋은 공개 API가 막는다(스펙 5장 409 `conflict`). 에이전트는 main 삭제만 거부하고, main의 `ParentLatest` 세대 생성(리셋)은 받아들인다.
-- `agentclient` 사용 시 주의점은 계획 3 항목과 같다(`agent.Ops`를 구현하지 않음, 리다이렉트를 따라가지 않음, `Code`가 빈 `APIError`).
+- `agentclient.Client`는 `agent.Ops`를 구현하지 않는다(클라이언트의 메서드는 모두 `ctx`를 받는다). 쓰는 메서드만 모은 인터페이스를 쓰는 쪽에 둔다(오퍼레이터는 `internal/controller`의 `AgentAPI`). 클라이언트는 리다이렉트를 따라가지 않아 3xx도 `APIError`다. `Code`가 빈 `APIError`는 `{error, code}` 본문이 아닌 응답이다. 프록시 같은 중간 장치가 냈거나, 에이전트의 라우터가 직접 낸 307(Go 1.27부터. 경로에 `.`·`..` 조각이 있거나, 빈 이름 때문에 `//`가 생긴 경우)·404(없는 경로)·405(맞지 않는 메서드)다.
 - `DeleteRestorePoint`를 다시 보내면 404다(지운 뒤에는 없는 복구 지점이다). 공개 API에서 삭제를 재시도할 때 404를 어떻게 다룰지 정한다.
 - 브랜치 데이터가 생기기 전에는 `ListRestorePoints`가 404다.
 - 복구 지점 라벨은 256바이트까지다(한글 약 85자). 스펙에는 한도가 없으므로 API 문서에 적는다.
