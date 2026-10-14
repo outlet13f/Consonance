@@ -157,6 +157,9 @@ status:
   conditions: []
 ```
 
+- 조건: `DataReady`(데이터를 만들었는지), `Ready`(원하는 상태에 있는지, 아니면 그 이유).
+- `lastRestore`에는 오퍼레이터가 재시작해도 이어서 진행하는 데 쓰는 `source`, `fromGeneration`, `toGeneration`, `restorePointId`(리셋으로 밀려난 세대를 담은 복구 지점), `reverting`, `message`, `startedAt`, `finishedAt`도 둔다. 요청 하나가 끝나기(`Done`·`Failed`) 전에 새 `requestId`가 오면 끝난 뒤에 수행한다.
+
 ### 4.4 복구 지점 카탈로그
 
 볼륨 에이전트만 쓰는 `/.consonance/catalog.json`. 임시 파일에 쓰고 fsync 후 이름을 바꿔 원자적으로 갱신한다.
@@ -252,21 +255,21 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 
 **Project 조정**
 
-1. Secret `db-credentials`(없을 때만 생성), Secret `internal-token`(에이전트·감독 프로세스 간 인증), NetworkPolicy, ResourceQuota를 맞춘다.
+1. Secret `db-credentials`(키 `username`·`password`·`database`), Secret `internal-token`(키 `token`, 에이전트·감독 프로세스 간 인증)을 없을 때만 만들고, NetworkPolicy, ResourceQuota(파드 `2 × maxBranches + 1`, PVC 1개, 저장 용량 `storage.size`)를 맞춘다. Secret 두 개와 PVC에는 소유자를 두지 않는다. Project 객체만 지워져도 데이터와 비밀번호는 남고, 네임스페이스를 지울 때 함께 지워진다.
 2. PVC `project-volume`(RWO, `spec.storage`)을 만든다.
-3. 에이전트 파드 `volume-agent`를 띄운다(Project가 소유).
+3. 에이전트 파드와 Service `volume-agent`(8443)를 띄운다(Project가 소유). 에이전트 인자(`--project-id`, `--min-copy-interval`, `--restore-points-per-branch`, `--restore-point-max-age`)는 Project spec에서 오고, 바뀌면 파드를 다시 만든다. PVC 바인딩은 기다리지 않는다(WaitForFirstConsumer 스토리지 클래스는 이 파드가 스케줄돼야 바인딩한다).
 4. 에이전트 `GET /v1/preflight`로 reflink 지원을 확인한다. `reflink: false`면 `ReflinkSupported=False`(이유 `ReflinkUnsupported`), phase Failed. 500은 일시 오류로 보고 다시 확인한다.
-5. main Branch가 없으면 만들고, 에이전트 `POST /v1/init-main`으로 `branches/main/data-1`을 초기화한다. main의 데이터는 여기서만 만든다.
+5. main Branch가 없으면 만든다(Project가 소유, `protected: true`). main의 데이터는 main의 Branch 조정이 에이전트 `POST /v1/init-main`으로만 만든다.
 6. main이 처음 Running이 되면 감독 프로세스 `POST /v1/bootstrap`을 호출해 접속 계정을 만들고 `MainReady=True`로 둔다. 이미 있으면 건너뛰므로 다시 호출해도 안전하다.
-7. 모든 조건이 참이면 phase Ready.
+7. 모든 조건이 참이면 phase Ready. 조건 `Ready`가 네 조건을 요약하고, 실패면 이유(`ReflinkUnsupported`, 네임스페이스 이름이 `cns-`로 시작하지 않으면 `InvalidNamespace`)를 단다. Ready인 프로젝트는 1분마다 에이전트 `GET /v1/usage`로 `status.volume`을 갱신한다.
 
 **Branch 조정**
 
-1. main이 아닌 브랜치의 데이터 디렉터리가 없으면 에이전트 `POST /v1/branches/{name}/data`를 호출한다. 성공하면 status `DataReady`, `dataReadyAt` 기록.
+1. 데이터가 없으면 main은 에이전트 `POST /v1/init-main`, 그 밖의 브랜치는 `POST /v1/branches/{name}/data`를 호출한다. 성공하면 status `DataReady`, `dataReadyAt` 기록. 영구 오류(10장)면 phase Failed와 조건 `DataReady=False`(이유 `ReflinkUnsupported`·`InsufficientStorage`·`SourceNotFound`·`Invalid`)로 두고 다시 시도하지 않는다.
 2. 브랜치 파드 `br-<name>`과 Service `br-<name>`을 맞춘다(Branch가 소유). 파드가 사라지면 다시 만든다.
 3. `spec.state`와 감독 프로세스 상태가 다르면 `POST /v1/start` 또는 `/v1/stop`을 호출한다.
 4. `spec.restore.requestId`가 `status.lastRestore.requestId`와 다르면 9.4의 롤백·리셋 절차를 단계별로 진행하고, 단계마다 `status.lastRestore.phase`를 기록한다(중간에 오퍼레이터가 재시작해도 이어서 진행).
-5. 삭제 시 파이널라이저에서 파드·Service를 지우고 에이전트 `DELETE /v1/branches/{name}/data`를 호출한 뒤 파이널라이저를 뗀다.
+5. 삭제 시 파이널라이저(`consonance.io/branch-cleanup`)에서 파드·Service를 지우고, 파드 객체가 사라진 뒤 에이전트 `DELETE /v1/branches/{name}/data`를 호출하고 파이널라이저를 뗀다. main의 데이터는 지우지 않고(Project 조정이 main Branch를 다시 만든다), Project가 없거나 삭제 중이면 에이전트를 부르지 않는다(네임스페이스 삭제가 볼륨을 가져간다). 롤백이 Detaching 단계일 때 지워지면, 에이전트가 이미 옮긴 옛 데이터는 백업 브랜치 Branch를 만들어 남기고, 아직 옮기지 않았으면 브랜치와 함께 지운다.
 
 ### 7.2 볼륨 에이전트 (`cmd/agent`, `internal/volume`)
 
@@ -328,6 +331,8 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - 에이전트 파드: `fsGroup: 999`, `fsGroupChangePolicy: OnRootMismatch`(대용량 볼륨에서 재귀 chown 방지). 자원 100m/128Mi.
 - 브랜치 파드: 볼륨 subPath `branches/<name>` → `/pgdata`, emptyDir → `/var/run/postgresql`, Secret `internal-token`, main만 Secret `db-credentials`. 자원은 Branch compute.
 - 같은 PVC(RWO)를 쓰므로 브랜치 파드는 에이전트 파드와 같은 노드에 둔다(필수 podAffinity, `kubernetes.io/hostname`).
+- 브랜치 Service `br-<이름>`은 5432와 8008을 노출하고 `publishNotReadyAddresses: true`다. PostgreSQL이 정지해 파드가 준비되지 않아도 오퍼레이터와 에이전트가 감독 프로세스에 닿아야 한다.
+- 파드는 서비스 계정 토큰을 마운트하지 않고, `terminationGracePeriodSeconds`는 45초다(감독 프로세스의 30초 fast shutdown, 에이전트의 25초 요청 대기).
 
 ### 7.6 이미지
 
@@ -344,7 +349,8 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - 브랜치 파드 5432: `consonance-system` 네임스페이스와 에이전트 파드에서만 허용.
 - 브랜치 파드 8008(감독 프로세스): `consonance-system`의 오퍼레이터와 에이전트 파드에서만 허용.
 - 에이전트 파드 8443: `consonance-system`의 오퍼레이터와 API 서버에서만 허용.
-- 브랜치 파드 아웃바운드: 모두 거부(PostgreSQL은 밖으로 나갈 일이 없다). 에이전트 아웃바운드: 같은 네임스페이스와 DNS만 허용.
+- `consonance-system`의 오퍼레이터와 API 서버는 파드 라벨 `app.kubernetes.io/name`(`consonance-operator`, `consonance-apiserver`)으로 가린다.
+- 브랜치 파드 아웃바운드: 모두 거부(PostgreSQL은 밖으로 나갈 일이 없다). 에이전트 아웃바운드: 같은 네임스페이스와 DNS(`kube-system`의 53번 포트)만 허용.
 
 ## 9. 주요 흐름
 
@@ -386,11 +392,11 @@ API 서버 → 에이전트 `POST /v1/branches/{b}/restore-points`. 브랜치 �
 
 API 서버가 `spec.restore`에 새 `requestId`와 출처를 쓰면 오퍼레이터가 단계별로 진행한다.
 
-1. **Preparing:** 에이전트 `POST /generations`로 새 세대를 만든다. 롤백이면 복구 지점 사본, 리셋이면 부모의 현재 상태(백업 모드 복사).
+1. **Preparing:** 에이전트 `POST /generations`로 새 세대를 만든다. 롤백이면 복구 지점 사본, 리셋이면 부모의 현재 상태(백업 모드 복사). 만들기 전과 만든 뒤에 현재 세대보다 번호가 큰 세대(활성화하지 못한 앞 시도의 결과)를 지운다.
 2. **Stopping:** 감독 프로세스 `/v1/stop`.
 3. **Activating:** 에이전트 `/generations/{n}/activate`로 `current` 전환.
-4. **Starting:** 감독 프로세스 `/v1/start`. 실패하면 `current`를 옛 세대로 되돌리고 다시 기동한 뒤 phase Failed.
-5. **Detaching:** 롤백이면 옛 세대를 백업 브랜치로 옮기고 그 Branch를 `state: Stopped`로 만든다. 백업 브랜치 이름은 `<브랜치 이름 앞 18자>-before-<UTC yyyymmddhhmmss>`(최대 40자, 예: `main-before-20261007031500`)다. 리셋이면 옛 세대를 복구 지점(`reason: reset`)으로 옮긴다.
+4. **Starting:** 감독 프로세스 `/v1/start`. 실패(500)하면 `current`를 옛 세대로 되돌리고 다시 기동하고 새 세대를 지운 뒤 phase Failed. 503은 아직 기동 중이라는 뜻이라 실패로 보지 않는다.
+5. **Detaching:** 롤백이면 옛 세대를 백업 브랜치로 옮기고 그 Branch를 `state: Stopped`로 만든다. 백업 브랜치 이름은 `<브랜치 이름 앞 18자>-before-<UTC yyyymmddhhmmss>`(최대 40자, 예: `main-before-20261007031500`)다. 같은 이름의 브랜치가 이미 있으면 다음 초의 이름을 쓴다. 리셋이면 옛 세대를 복구 지점(`reason: reset`)으로 옮긴다.
 6. **Done:** `status.lastRestore`에 결과(`backupBranch` 포함) 기록.
 
 연결 문자열은 바뀌지 않는다. 진행 중 기존 연결은 끊긴다.
@@ -447,7 +453,7 @@ consonance/
 │   ├── agentclient/
 │   ├── supervisorclient/
 │   └── httpapi/             REST 핸들러, problem+json, OpenAPI
-├── config/                  CRD·RBAC·개발용 매니페스트 (kustomize)
+├── config/                  CRD(crd/bases)·RBAC(rbac, controller-gen이 만든다)·개발용 매니페스트 (kustomize)
 ├── images/                  Dockerfile 4종
 ├── test/e2e/, test/perf/
 ├── spikes/branching-poc/    (버릴 코드, 참고용)

@@ -4,15 +4,6 @@
 
 ## 계획 1(감독 프로세스)에서
 
-### 계획 3(CRD·오퍼레이터)이 반영할 것
-
-- 브랜치 파드의 `terminationGracePeriodSeconds`는 45초 이상으로 둔다(stop-grace 30초 + SIGQUIT 뒤 대기 10초 + 여유). 쿠버네티스 기본값 30초는 짧다.
-- 브랜치 파드에는 항상 `limits.memory`를 준다. 한도가 없으면 Downward API가 노드 메모리를 넘겨 `shared_buffers`가 너무 크게 잡힌다.
-- `AUTOSTART`, `MEMORY_LIMIT_BYTES`에는 유효한 값만 준다. 잘못된 값은 조용히 기본값으로 바뀐다.
-- `/v1/start`의 503은 아직 기동 중이라는 뜻이다. 실패가 아니므로 9.4의 되돌리기를 하지 말고 `/v1/status`를 다시 확인한다. 500도 기동이 끝났다는 뜻은 아니므로 상태를 다시 확인한다.
-- `/v1/start`의 409는 두 가지다. 다른 작업이 진행 중이거나(`ErrBusy`), 실행 중인 세대와 `current`가 다르다(`ErrGenerationMismatch`). 지금은 메시지로만 구분하므로, 오퍼레이터가 둘을 구분해야 하면 기계가 읽을 수 있는 오류 코드를 추가한다.
-- 9.4 롤백에서 `current` 전환은 `/v1/status`가 `stopped`를 보인 뒤에 한다. 실행 중에 링크를 바꾸고 `start`를 부르면 409가 온다.
-
 ### 미뤄 둔 개선 사항
 
 pgctl 프로세스 관리:
@@ -57,23 +48,6 @@ pgctl 부트스트랩:
 - `TestFreePortIsUsable`은 포트 범위만 확인한다. `SocketDir` 테스트가 없고, `InitDB` 테스트는 `PG_VERSION`이 17인지 보지 않는다. `SharedBuffers` 표에 음수, 정확한 경계, 내림 사례가 없다. `Args`는 입력을 검증하지 않는다.
 
 ## 계획 2(볼륨 에이전트)에서
-
-### 계획 3(CRD·오퍼레이터)이 반영할 것
-
-- 브랜치 Service `br-<이름>`은 5432와 함께 감독 프로세스 포트 8008을 노출한다. 에이전트는 `http://br-<브랜치>:8008`로 감독 프로세스를 부른다(`--supervisor-url`).
-- 에이전트 파드 인자는 Project spec에서 온다: `--min-copy-interval`(`limits.minCopyInterval`), `--restore-points-per-branch`·`--restore-point-max-age`(`restorePoints`), `--project-id`. 값을 바꾸면 에이전트 파드를 다시 띄워야 반영된다. 볼륨은 `/volume`, 토큰은 Secret `internal-token`(키 `token`)을 `/etc/consonance/token`에 마운트한다(에이전트는 `/etc/consonance/token/token`을 읽는다).
-- main 파드는 init-main이 성공한 뒤에 만든다. 그 전에 뜬 감독 프로세스는 `/v1/start`에 500(`data directory does not resolve`)을 돌려준다.
-- 에이전트 오류 코드에 따라 다르게 한다: `busy`·`supervisor-unavailable`·500은 지수 백오프로 재시도, `rate-limited`는 `Retry-After` 뒤 재시도, `not-running`은 부모가 실행 중이 아님(API 409), `conflict`는 상태 문제라 그대로 재시도하지 않는다. 단 복사(`CreateBranchData`·`CreateGeneration`·`CreateRestorePoint`)의 `conflict`는 복사 도중 원본이 멈췄거나 다른 세대로 다시 시작했다는 뜻이므로, 원본이 다시 실행 중이 되면 재시도한다. `reflink-unsupported`(501)·`insufficient-storage`(507)와 브랜치 데이터 생성의 `not-found`(부모에 데이터 없음)는 영구 오류다(스펙 10장: phase Failed, 재시도하지 않는다). 복사 도중 원본 브랜치를 정지하면 그 뒤 최대 30초 동안 `busy`가 올 수 있다.
-- 재시도해도 안전한 호출: `CreateBranchData`(데이터가 있으면 그 세대와 빈 LSN), `InitMain`, `DetachGeneration`(이미 옮겼으면 롤백은 toBranch를, 리셋은 그때 만든 복구 지점을 돌려준다), `DeleteBranchData`(없으면 성공). 그래서 `DetachGeneration`의 404는 옮길 세대가 없다는 뜻이다. `CreateGeneration`은 부를 때마다 새 세대를 만들므로 재시도해도 안전하지 않다. 그래서 Preparing에서 세대를 만들기 전에는 언제나(오퍼레이터가 재시작한 뒤든 재시도든) `ListGenerations`로 현재 세대보다 번호가 큰 세대(활성화하지 못한 앞 시도의 결과)를 `DeleteGeneration`으로 치우고, `CreateGeneration`이 돌려준 세대 말고도 현재 세대보다 큰 세대가 있으면(응답을 잃은 앞 요청이나 앞 오퍼레이터가 보낸 요청이 만든 것) Activating 전에 지운다. 새 세대는 언제나 있는 세대들보다 큰 번호를 받는다. 현재 세대보다 번호가 작은 세대는 사용자의 롤백·리셋 전 데이터일 수 있으므로 지우지 않는다.
-- `ActivateGeneration`은 감독 프로세스가 `stopped`를 보일 때만 `current`를 바꾼다(다른 상태면 409, 감독 프로세스가 응답하지 않으면 502 `supervisor-unavailable`). n이 이미 현재 세대면 감독 프로세스에 묻지 않고 성공하므로 다시 불러도 안전하다. `DetachGeneration`·`DeleteGeneration`은 n이 현재 세대이거나 PostgreSQL이 그 세대를 쓰고 있으면 409, 감독 프로세스가 응답하지 않으면 502다.
-- 스펙 11장의 메트릭은 에이전트에 아직 없다(계획 5).
-- 브랜치 데이터 삭제(`DeleteBranchData`)는 브랜치 파드 객체가 사라진 뒤에 부른다. 삭제를 요청한 것만으로는 부족하다. 에이전트는 감독 프로세스가 응답하지 않으면 파드가 없다고 보고 지운다.
-- 롤백의 Detaching 단계는 기존 세대를 백업 브랜치로 옮긴 뒤에 백업 Branch CR을 만든다. CR을 먼저 만들면 그 Branch의 조정이 `CreateBranchData`로 데이터를 먼저 만들어, 옮길 자리가 이미 차 있게 된다(`conflict`).
-- 스펙 11장 로그의 `requestId`는 계획 2에 만드는 곳이 없다. 오퍼레이터·API 서버가 만들어 에이전트에 넘기는 방법(예: 요청 헤더)을 정하고 에이전트 로그에 남긴다.
-- `agentclient.Client`는 `agent.Ops`를 구현하지 않는다(클라이언트의 메서드는 모두 `ctx`를 받는다). 쓰는 메서드만 모은 인터페이스를 쓰는 쪽에 둔다. 클라이언트는 리다이렉트를 따라가지 않아 3xx도 `APIError`다. `Code`가 빈 `APIError`는 `{error, code}` 본문이 아닌 응답이다. 프록시 같은 중간 장치가 냈거나, 에이전트의 라우터가 직접 낸 307(Go 1.27부터. 경로에 `.`·`..` 조각이 있거나, 빈 이름 때문에 `//`가 생긴 경우)·404(없는 경로)·405(맞지 않는 메서드)다.
-- 에이전트 파드(`volume-agent`)의 `terminationGracePeriodSeconds`도 45초 이상으로 둔다. 에이전트는 SIGTERM을 받으면 진행 중인 요청을 최대 25초 기다린 뒤(그 안에 끝나지 않으면 종료 코드 1) 휴지통 비우기가 끝나기를 기다린다. 쿠버네티스 기본값 30초는 빠듯하다.
-- 에이전트 파드의 프로브는 토큰 없이 200을 돌려주는 `GET /healthz`를 쓴다. 에이전트는 기동 시 정리(`Recover`)를 마친 뒤에 요청을 받기 시작한다.
-- 에이전트는 init-main의 initdb를 요청에 묶어 실행한다. initdb가 클라이언트 제한(기본 60초)보다 오래 걸리면 재시도할 때마다 initdb가 죽고 처음부터 다시 한다. 에이전트 파드의 CPU 한도(100m)에서 initdb 시간을 재고(계획 5), 필요하면 init-main 호출에 더 긴 제한을 준다.
 
 ### 계획 4(REST API 서버)가 반영할 것
 
@@ -124,3 +98,27 @@ VM·이미지:
 
 - `make test-xfs`에 `-count=1`이 없어 XFS 마운트를 잃어도 캐시된 ok가 나올 수 있다. `xfstest`의 확인은 reflink를 보지 않고, `Dir`의 건너뛰기·정리 계약에 테스트가 없고, `RemoveAll` 오류를 버린다. `vm-setup.sh`는 이미지 파일이 있는지만 보고 그 안에 파일 시스템이 있는지는 보지 않는다.
 - 스모크 테스트에 CPU 한도(100m)가 없다. curl이 시간 초과로 끝나면 `docker logs`·OOMKilled를 보이기 전에 스크립트가 끝난다. colima에 buildx가 없어 빌드할 때마다 약 1.4GB의 이름 없는 빌드 단계 이미지가 남는다.
+
+## 계획 3(CRD·오퍼레이터)에서
+
+### 계획 4(REST API 서버)가 반영할 것
+
+- 프로젝트 생성은 네임스페이스 `cns-<projectId>`와 그 안의 Project `project`를 만드는 것이다. spec에서 비운 값은 CRD 기본값(스펙 14장)이 채운다. 진행은 `status.phase`와 조건(`VolumeReady`, `AgentReady`, `ReflinkSupported`, `MainReady`, 이를 요약한 `Ready`)으로 읽는다.
+- 브랜치 생성 전 검사(부모 실행 중, `maxBranches`, 이름 형식)는 API가 한다. 오퍼레이터는 브랜치 수를 세지 않고, 부모가 실행 중이 아니면 데이터 만들기를 기다린다(`DataReady=False`, 이유 `ParentNotRunning`). 롤백이 만든 백업 브랜치(라벨 `consonance.io/backup-of`)도 Branch다. 개수에 넣을지 정한다.
+- 브랜치의 영구 실패는 phase `Failed`와 조건 `DataReady=False`의 이유(`ReflinkUnsupported`·`InsufficientStorage`·`SourceNotFound`·`Invalid`)로 드러난다. 기동 실패는 phase `Failed`, 조건 `Ready=False`(이유 `StartFailed`)이고 오퍼레이터가 계속 다시 시도한다.
+- 롤백·리셋은 `spec.restore`에 새 `requestId`와 출처를 쓰고, `status.lastRestore.requestId`가 그 값이 되고 `phase`가 `Done`이나 `Failed`가 될 때까지 기다린다. 응답의 `backupBranch`는 `lastRestore.backupBranch`, 리셋이 만든 복구 지점은 `lastRestore.restorePointId`다. 진행 중인 요청이 끝나기 전에 쓴 새 `requestId`는 끝난 뒤에 수행된다. 정지된 브랜치도 새 데이터가 기동하는지 확인하려고 잠시 기동했다가 다시 정지한다.
+- `spec.restore`는 요청 하나만 담는다. 진행 중인 요청이 끝나기 전에 두 번 쓰면 그사이에 쓴 요청은 수행되지 않는다. API는 진행 중인 요청이 있으면 새 요청을 409로 막는다. main 리셋도 409로 막는다(오퍼레이터는 에이전트를 부르기 전에 Failed로 끝낸다).
+- 접속 정보는 Secret `db-credentials`(`username`·`password`·`database`)와 Branch `status.endpoint`에서 온다.
+- main Branch 객체를 지우면 오퍼레이터가 데이터는 둔 채 다시 만든다. main 삭제는 API가 409로 막는다.
+
+### 계획 5(배포·E2E·성능)가 반영할 것
+
+- 오퍼레이터 Deployment는 `consonance-system`에서 파드 라벨 `app.kubernetes.io/name: consonance-operator`로 띄운다(API 서버는 `consonance-apiserver`). 네트워크 정책이 이 라벨로 오퍼레이터와 API 서버를 가린다. 서비스 계정에는 `config/rbac/role.yaml`의 ClusterRole `consonance-operator`를 묶고, 복제본이 여럿이면 `--leader-elect`를 켠다. 이미지는 `--agent-image`·`--postgres-image`로 준다.
+- `consonance/operator` 이미지는 아직 없다(스펙 7.6).
+- k3s(kube-router)에서 네트워크 정책이 kubelet 프로브를 막지 않는지, 에이전트의 DNS 이그레스(`kube-system`의 53번 포트)가 맞는지 E2E로 확인한다.
+- 스펙 11장의 메트릭은 에이전트에도 오퍼레이터에도 아직 없다. status의 `timings`(`dataReadyAt`, `runningAt`)와 `lastRestore`의 시각만 있다.
+- `requestId`: 오퍼레이터는 롤백·리셋 로그에 `spec.restore.requestId`를 남기지만 에이전트와 감독 프로세스에는 넘기지 않는다.
+- 에이전트 파드의 CPU 한도(100m)에서 initdb 시간을 잰다. 오퍼레이터의 init-main 호출 제한은 5분이다.
+- 개발용 스토리지 클래스 `consonance-xfs`(XFS + reflink)를 만든다. envtest는 PVC를 바인딩하지 않으므로 볼륨 바인딩과 `VolumeReady`는 E2E에서 처음 확인된다.
+- 오퍼레이터는 SIGTERM을 받으면 진행 중인 조정의 컨텍스트를 취소하고 끝나기를 기다린다(최대 30초). 끊긴 단계는 재시작 뒤 status에서 이어서 한다.
+- 매니페스트를 내기 전에 ClusterRole에서 쓰지 않는 권한을 줄인다. 대상은 Secret·PVC의 update·patch·delete, 파드의 update·patch, Service의 patch, 쿼터·네트워크 정책의 patch·delete, Branch의 patch·delete, status의 get·patch, 리스의 list·watch·patch·delete다. 리스와 이벤트 권한은 `consonance-system`의 Role로 옮긴다. 줄인 뒤 `cmd/operator`의 테스트를 돌린다. 그 테스트는 오퍼레이터 역할로 각 경로를 확인한다. 클러스터 밖에서 리더 선출을 켜려면 `--leader-election-namespace` 플래그가 필요하다.
