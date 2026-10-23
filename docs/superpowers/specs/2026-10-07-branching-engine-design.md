@@ -331,7 +331,7 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - 에이전트 파드: `fsGroup: 999`, `fsGroupChangePolicy: OnRootMismatch`(대용량 볼륨에서 재귀 chown 방지). 자원 100m/128Mi.
 - 브랜치 파드: 볼륨 subPath `branches/<name>` → `/pgdata`, emptyDir → `/var/run/postgresql`, Secret `internal-token`, main만 Secret `db-credentials`. 자원은 Branch compute.
 - 같은 PVC(RWO)를 쓰므로 브랜치 파드는 에이전트 파드와 같은 노드에 둔다(필수 podAffinity, `kubernetes.io/hostname`).
-- 에이전트 파드를 새로 만들 때 실행 중인 브랜치 파드가 있으면 그 노드에 둔다(필수 nodeAffinity, `kubernetes.io/hostname`). 네트워크 RWO 볼륨은 붙어 있는 노드를 떠날 수 없다.
+- 에이전트 파드를 새로 만들 때 실행 중인 브랜치 파드가 있으면 그 노드에 둔다(필수 nodeAffinity, 노드 이름 `metadata.name`). 네트워크 RWO 볼륨은 붙어 있는 노드를 떠날 수 없다. 그 노드에 실행 중인 브랜치 파드가 더 없는데 에이전트 파드가 스케줄되지 못하면 다시 만든다.
 - 브랜치 Service `br-<이름>`은 5432와 8008을 노출하고 `publishNotReadyAddresses: true`다. PostgreSQL이 정지해 파드가 준비되지 않아도 오퍼레이터와 에이전트가 감독 프로세스에 닿아야 한다.
 - 파드는 서비스 계정 토큰을 마운트하지 않고, `terminationGracePeriodSeconds`는 45초다(감독 프로세스의 30초 fast shutdown, 에이전트의 25초 요청 대기).
 

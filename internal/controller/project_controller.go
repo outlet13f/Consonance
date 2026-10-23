@@ -293,6 +293,18 @@ func (r *ProjectReconciler) ensureAgent(ctx context.Context, p *v1alpha1.Project
 		return true, client.IgnoreNotFound(r.Delete(ctx, &pod))
 	}
 	if c := unschedulable(&pod); c != nil {
+		// Pinned to a node no running branch pod is on any more (a node that is gone): nothing
+		// holds the volume there, so the pod is made again where it can run.
+		if pinned := pinnedNode(&pod); pinned != "" {
+			node, err := r.runningBranchNode(ctx, p.Namespace)
+			if err != nil {
+				return false, err
+			}
+			if node != pinned {
+				logf.FromContext(ctx).Info("replacing the agent pod", "reason", "no running branch pod on its node", "node", pinned)
+				return true, client.IgnoreNotFound(r.Delete(ctx, &pod))
+			}
+		}
 		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, "Unschedulable", c.Message)
 		return false, nil
 	}

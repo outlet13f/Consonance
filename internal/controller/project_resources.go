@@ -245,14 +245,32 @@ func desiredAgentPod(p *v1alpha1.Project, projectID, image string) *corev1.Pod {
 	}
 }
 
-// onNode requires a pod to run on node. It is set on the pod, outside the container spec, so it
-// does not change the spec-hash.
+// onNode requires a pod to run on the node named node: a pod's spec.nodeName is the Node's
+// metadata.name, which the hostname label need not equal. It is set on the pod, outside the
+// container spec, so it does not change the spec-hash.
 func onNode(node string) *corev1.Affinity {
 	return &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
 		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-			MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpIn, Values: []string{node}}},
+			MatchFields: []corev1.NodeSelectorRequirement{{Key: metav1.ObjectNameField, Operator: corev1.NodeSelectorOpIn, Values: []string{node}}},
 		}}},
 	}}
+}
+
+// pinnedNode is the node onNode pinned a pod to, or "".
+func pinnedNode(pod *corev1.Pod) string {
+	a := pod.Spec.Affinity
+	if a == nil || a.NodeAffinity == nil || a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return ""
+	}
+	terms := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 || len(terms[0].MatchFields) != 1 {
+		return ""
+	}
+	f := terms[0].MatchFields[0]
+	if f.Key != metav1.ObjectNameField || f.Operator != corev1.NodeSelectorOpIn || len(f.Values) != 1 {
+		return ""
+	}
+	return f.Values[0]
 }
 
 // desiredAgentService gives the agent the address the operator and API server call:

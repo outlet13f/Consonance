@@ -5,10 +5,12 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"consonance/api/v1alpha1"
 	"consonance/internal/testutil/kubetest"
 )
 
@@ -48,12 +50,12 @@ func TestANewAgentPodFollowsTheRunningBranchPods(t *testing.T) {
 		t.Fatalf("affinity %+v, want a required node affinity", aff)
 	}
 	terms := aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
-	if len(terms) != 1 || len(terms[0].MatchExpressions) != 1 {
-		t.Fatalf("node selector terms %+v", terms)
+	if len(terms) != 1 || len(terms[0].MatchFields) != 1 || len(terms[0].MatchExpressions) != 0 {
+		t.Fatalf("node selector terms %+v, want one field term", terms)
 	}
-	e := terms[0].MatchExpressions[0]
-	if e.Key != "kubernetes.io/hostname" || e.Operator != corev1.NodeSelectorOpIn || len(e.Values) != 1 || e.Values[0] != "node-a" {
-		t.Errorf("node selector %+v, want kubernetes.io/hostname In [node-a]", e)
+	f := terms[0].MatchFields[0]
+	if f.Key != metav1.ObjectNameField || f.Operator != corev1.NodeSelectorOpIn || len(f.Values) != 1 || f.Values[0] != "node-a" {
+		t.Errorf("node selector %+v, want metadata.name In [node-a]", f)
 	}
 	if aff.PodAffinity != nil || aff.PodAntiAffinity != nil {
 		t.Errorf("affinity %+v", aff)
@@ -69,5 +71,45 @@ func TestANewAgentPodFollowsTheRunningBranchPods(t *testing.T) {
 
 	if pod := agentPodWith(t); pod.Spec.Affinity != nil {
 		t.Errorf("affinity %+v with no branch pods", pod.Spec.Affinity)
+	}
+}
+
+// An agent pod pinned to a node that no running branch pod is on any more, and that cannot be
+// scheduled there, is made again; one whose branch pods still run there waits for its node.
+func TestAnAgentPodPinnedToAGoneNodeIsMadeAgain(t *testing.T) {
+	ctx := context.Background()
+	p := testProject("cns-x")
+	stuck := func() *corev1.Pod {
+		pod := desiredAgentPod(p, "x", testAgentImage)
+		pod.Spec.Affinity = onNode("node-gone")
+		pod.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message: "0/2 nodes are available: 2 node(s) didn't match Pod's node affinity/selector.",
+		}}}
+		return pod
+	}
+	run := func(objs ...client.Object) (client.Client, bool) {
+		t.Helper()
+		c := fake.NewClientBuilder().WithScheme(kubetest.Scheme()).WithObjects(objs...).Build()
+		r := &ProjectReconciler{Client: c, Scheme: c.Scheme(), AgentImage: testAgentImage}
+		scheduled, err := r.ensureAgent(ctx, p, "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c, scheduled
+	}
+	key := client.ObjectKey{Namespace: p.Namespace, Name: AgentName}
+
+	c, _ := run(stuck())
+	if err := c.Get(ctx, key, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Errorf("the agent pod pinned to a node with no branch pods is still there: %v", err)
+	}
+
+	c, scheduled := run(stuck(), runningBranchPod("dev", "node-gone"))
+	if err := c.Get(ctx, key, &corev1.Pod{}); err != nil {
+		t.Errorf("the agent pod whose branch pods still run on its node: %v", err)
+	}
+	if scheduled || cond(p.Status.Conditions, v1alpha1.ConditionAgentReady) != "False/Unschedulable" {
+		t.Errorf("scheduled %v, AgentReady %s", scheduled, cond(p.Status.Conditions, v1alpha1.ConditionAgentReady))
 	}
 }
