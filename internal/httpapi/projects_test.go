@@ -27,7 +27,7 @@ import (
 func projectObjs(id, displayName string, status v1alpha1.ProjectStatus) []client.Object {
 	ns := "cns-" + id
 	return []client.Object{
-		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns, Labels: map[string]string{"app.kubernetes.io/managed-by": "consonance-apiserver"}}},
 		&v1alpha1.Project{
 			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: controller.ProjectName},
 			Spec: v1alpha1.ProjectSpec{
@@ -281,6 +281,13 @@ func TestListProjects(t *testing.T) {
 	objs = append(objs, &v1alpha1.Project{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "project"},
 		Spec:       v1alpha1.ProjectSpec{DisplayName: "stray"},
+	}, &v1alpha1.Project{
+		// get refuses these ids, so list must not show them.
+		ObjectMeta: metav1.ObjectMeta{Namespace: "cns-foo", Name: "project"},
+		Spec:       v1alpha1.ProjectSpec{DisplayName: "bad id"},
+	}, &v1alpha1.Project{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "cns-cccccccccccc", Name: "other"},
+		Spec:       v1alpha1.ProjectSpec{DisplayName: "bad name"},
 	})
 	srv, _, _ := newTestServer(t, objs...)
 	resp, body := call(t, srv, http.MethodGet, "/v1/projects", nil)
@@ -329,7 +336,10 @@ func TestDeleteProject(t *testing.T) {
 
 func TestDeleteProjectAlreadyTerminating(t *testing.T) {
 	now := metav1.Now()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "cns-aaaaaaaaaaaa", DeletionTimestamp: &now, Finalizers: []string{"kubernetes"}}}
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: "cns-aaaaaaaaaaaa", DeletionTimestamp: &now, Finalizers: []string{"kubernetes"},
+		Labels: map[string]string{"app.kubernetes.io/managed-by": "consonance-apiserver"},
+	}}
 	srv, _, _ := newTestServer(t, ns)
 	resp, body := call(t, srv, http.MethodDelete, "/v1/projects/aaaaaaaaaaaa", nil)
 	if resp.StatusCode != http.StatusAccepted {
@@ -343,4 +353,19 @@ func apiAlreadyExists(obj client.Object) error {
 
 func apiInvalid(obj client.Object) error {
 	return apierrors.NewBadRequest("the Project was refused")
+}
+
+func TestDeleteRefusesANamespaceTheAPIServerDidNotMake(t *testing.T) {
+	objs := projectObjs("aaaaaaaaaaaa", "a", readyStatus())
+	objs[0].SetLabels(nil)
+	objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "cns-bbbbbbbbbbbb", Labels: map[string]string{"app.kubernetes.io/managed-by": "someone-else"}}})
+	srv, c, _ := newTestServer(t, objs...)
+	for _, id := range []string{"aaaaaaaaaaaa", "bbbbbbbbbbbb"} {
+		resp, body := call(t, srv, http.MethodDelete, "/v1/projects/"+id, nil)
+		wantProblem(t, resp, body, http.StatusNotFound, typeNotFound)
+		var ns corev1.Namespace
+		if err := c.Get(context.Background(), client.ObjectKey{Name: "cns-" + id}, &ns); err != nil {
+			t.Errorf("namespace cns-%s was deleted: %v", id, err)
+		}
+	}
 }

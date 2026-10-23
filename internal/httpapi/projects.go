@@ -288,7 +288,8 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) error {
 	views := []projectView{}
 	for i := range list.Items {
 		p := &list.Items[i]
-		if id, ok := controller.ProjectID(p.Namespace); ok {
+		// The same rule as project(), so what the list shows can be got.
+		if id, ok := controller.ProjectID(p.Namespace); ok && validProjectID(id) && p.Name == controller.ProjectName {
 			views = append(views, viewOf(id, p))
 		}
 	}
@@ -309,15 +310,27 @@ func (s *server) getProject(w http.ResponseWriter, r *http.Request) error {
 }
 
 // deleteProject deletes the namespace; Kubernetes removes what is in it, volume included, and
-// the answer does not wait for that. A namespace that is going already is not an error.
+// the answer does not wait for that. A namespace that is going already is not an error. Only a
+// namespace this API server made (its managed-by label) is deleted: a cns-<12 characters> name
+// is not proof, and the delete is of everything in it. The namespace is read uncached, so the
+// check sees what the cluster has now.
 func (s *server) deleteProject(w http.ResponseWriter, r *http.Request) error {
 	id := r.PathValue("projectId")
 	logAttrs(r.Context(), "projectId", id)
 	if !validProjectID(id) {
 		return notFound("no project %q", id)
 	}
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: controller.NamespacePrefix + id}}
-	err := s.client.Delete(r.Context(), ns, client.PropagationPolicy(metav1.DeletePropagationBackground))
+	var ns corev1.Namespace
+	err := s.reader.Get(r.Context(), client.ObjectKey{Name: controller.NamespacePrefix + id}, &ns)
+	switch {
+	case apierrors.IsNotFound(err):
+		return notFound("no project %q", id)
+	case err != nil:
+		return fromKube(err)
+	case ns.Labels[controller.LabelManagedBy] != apiServerManager:
+		return notFound("no project %q", id)
+	}
+	err = s.client.Delete(r.Context(), &ns, client.PropagationPolicy(metav1.DeletePropagationBackground))
 	switch {
 	case apierrors.IsNotFound(err):
 		return notFound("no project %q", id)
