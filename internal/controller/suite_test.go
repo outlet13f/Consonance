@@ -178,6 +178,17 @@ func updateStatus[T client.Object](t *testing.T, obj T, change func(T)) {
 	})
 }
 
+// unschedule marks a pod as one the scheduler found no node for, which no scheduler does under
+// envtest.
+func unschedule(t *testing.T, ns, name, msg string) {
+	t.Helper()
+	updateStatus(t, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}, func(pod *corev1.Pod) {
+		pod.Status.Conditions = []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable, Message: msg,
+		}}
+	})
+}
+
 // ignoreExists treats a create that lost a race to the operator as done.
 func ignoreExists(err error) error {
 	if apierrors.IsAlreadyExists(err) {

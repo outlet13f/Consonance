@@ -50,11 +50,12 @@ type Connector interface {
 
 // Time limits of the operator's calls. The HTTP client has none: each call's context bounds it.
 const (
-	callTimeout  = 10 * time.Second // status, lists, preflight, usage, activate, detach, deletes
-	copyTimeout  = 3 * time.Minute  // CreateBranchData, CreateGeneration: a backup start waits for a checkpoint
-	initTimeout  = 5 * time.Minute  // InitMain: initdb on the agent's 100m CPU (carry-over from plan 2)
-	startTimeout = 75 * time.Second // the supervisor waits up to 60s for PostgreSQL to accept connections
-	stopTimeout  = 60 * time.Second // a 30s fast shutdown, then an immediate one
+	callTimeout   = 10 * time.Second // lists, preflight, usage, activate, detach, deletes
+	statusTimeout = 2 * time.Second  // a supervisor's status: one that answers does so at once, and a dead node's endpoint must not hold a worker
+	copyTimeout   = 3 * time.Minute  // CreateBranchData, CreateGeneration: a backup start waits for a checkpoint
+	initTimeout   = 5 * time.Minute  // InitMain: initdb on the agent's 100m CPU (carry-over from plan 2)
+	startTimeout  = 75 * time.Second // the supervisor waits up to 60s for PostgreSQL to accept connections
+	stopTimeout   = 60 * time.Second // a 30s fast shutdown, then an immediate one
 )
 
 // HTTPConnector reaches the agent and the supervisors through their services, from inside the

@@ -150,8 +150,13 @@ func (r *ProjectReconciler) reconcile(ctx context.Context, p *v1alpha1.Project) 
 	}
 
 	// Step 3: the agent.
-	if err := r.ensureAgent(ctx, p, id); err != nil {
+	scheduled, err := r.ensureAgent(ctx, p, id)
+	if err != nil {
+		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, "AgentPodFailed", err.Error())
 		return ctrl.Result{}, err
+	}
+	if !scheduled {
+		return ctrl.Result{}, nil // nothing below works without the agent; the pod's status change brings the project back
 	}
 	agent := r.Connector.Agent(p.Namespace, token)
 
@@ -247,8 +252,9 @@ func (r *ProjectReconciler) ensurePVC(ctx context.Context, p *v1alpha1.Project) 
 }
 
 // ensureAgent keeps the agent's service and pod. A pod that ended, or that runs old settings, is
-// deleted, and the next reconcile makes it anew.
-func (r *ProjectReconciler) ensureAgent(ctx context.Context, p *v1alpha1.Project, projectID string) error {
+// deleted, and the next reconcile makes it anew. It reports false, having set AgentReady to say
+// why, when the scheduler finds no node for the pod.
+func (r *ProjectReconciler) ensureAgent(ctx context.Context, p *v1alpha1.Project, projectID string) (scheduled bool, err error) {
 	wantSvc := desiredAgentService(p.Namespace)
 	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: wantSvc.Name, Namespace: wantSvc.Namespace}}
 	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
@@ -256,27 +262,67 @@ func (r *ProjectReconciler) ensureAgent(ctx context.Context, p *v1alpha1.Project
 		svc.Spec.Selector, svc.Spec.Ports = wantSvc.Spec.Selector, wantSvc.Spec.Ports
 		return controllerutil.SetControllerReference(p, svc, r.Scheme)
 	}); err != nil {
-		return err
+		return false, err
 	}
 	want := desiredAgentPod(p, projectID, r.AgentImage)
 	var pod corev1.Pod
-	err := r.Get(ctx, client.ObjectKeyFromObject(want), &pod)
+	err = r.Get(ctx, client.ObjectKeyFromObject(want), &pod)
 	switch {
 	case apierrors.IsNotFound(err):
-		if err := controllerutil.SetControllerReference(p, want, r.Scheme); err != nil {
-			return err
+		node, err := r.runningBranchNode(ctx, p.Namespace)
+		if err != nil {
+			return false, err
 		}
-		return r.Create(ctx, want)
+		if node != "" {
+			want.Spec.Affinity = onNode(node)
+		}
+		if err := controllerutil.SetControllerReference(p, want, r.Scheme); err != nil {
+			return false, err
+		}
+		return true, r.Create(ctx, want)
 	case err != nil:
-		return err
+		return false, err
 	case pod.DeletionTimestamp != nil:
-		return nil // on its way out; its deletion brings the project back
+		return true, nil // on its way out; its deletion brings the project back
 	case pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded ||
 		pod.Annotations[AnnotationSpecHash] != want.Annotations[AnnotationSpecHash]:
 		logf.FromContext(ctx).Info("replacing the agent pod", "phase", pod.Status.Phase)
-		return client.IgnoreNotFound(r.Delete(ctx, &pod))
+		return true, client.IgnoreNotFound(r.Delete(ctx, &pod))
+	}
+	if c := unschedulable(&pod); c != nil {
+		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, "Unschedulable", c.Message)
+		return false, nil
+	}
+	return true, nil
+}
+
+// unschedulable returns a pod's PodScheduled condition if the scheduler found no node for it.
+func unschedulable(pod *corev1.Pod) *corev1.PodCondition {
+	for i, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
+			return &pod.Status.Conditions[i]
+		}
 	}
 	return nil
+}
+
+// runningBranchNode is the node of the project's running branch pods, or "" if none runs. A new
+// agent pod must go there: the RWO volume can only follow the pods already holding it.
+func (r *ProjectReconciler) runningBranchNode(ctx context.Context, ns string) (string, error) {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(ns), client.MatchingLabels{LabelComponent: ComponentBranch}); err != nil {
+		return "", err
+	}
+	node, first := "", ""
+	for _, pod := range pods.Items {
+		if pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil || pod.Spec.NodeName == "" {
+			continue
+		}
+		if first == "" || pod.Name < first { // all on one node, but if not, the first by name
+			node, first = pod.Spec.NodeName, pod.Name
+		}
+	}
+	return node, nil
 }
 
 // ensureMainBranch makes the main Branch once (spec 7.1 step 5). The Project owns it.

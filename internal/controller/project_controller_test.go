@@ -203,6 +203,36 @@ func TestProjectWaitsForItsAgent(t *testing.T) {
 	}
 }
 
+// An agent pod the scheduler finds no node for is reported, and the reconcile stops there:
+// nothing after it works without the agent.
+func TestAnUnschedulableAgentPodIsReported(t *testing.T) {
+	ns, _ := createProject(t, nil)
+	ctx := context.Background()
+	// Main bootstrapped first: a reconcile that went on past the agent would then reach the usage
+	// call, which the fake agent answers, and set AgentReady back to true.
+	eventually(t, 15*time.Second, func() string {
+		var pod corev1.Pod
+		if err := kenv.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: AgentName}, &pod); err != nil {
+			return "agent pod: " + err.Error()
+		}
+		if p := getProject(t, ns); !meta.IsStatusConditionTrue(p.Status.Conditions, v1alpha1.ConditionMainReady) {
+			return "MainReady " + cond(p.Status.Conditions, v1alpha1.ConditionMainReady)
+		}
+		return ""
+	})
+	const msg = "0/3 nodes are available: 3 node(s) didn't match Pod's node affinity/selector."
+	unschedule(t, ns, AgentName, msg)
+	eventually(t, 10*time.Second, func() string {
+		if c := cond(getProject(t, ns).Status.Conditions, v1alpha1.ConditionAgentReady); c != "False/Unschedulable" {
+			return "AgentReady " + c
+		}
+		return ""
+	})
+	if c := meta.FindStatusCondition(getProject(t, ns).Status.Conditions, v1alpha1.ConditionAgentReady); c == nil || c.Message != msg {
+		t.Errorf("AgentReady %+v, want the scheduler's message", c)
+	}
+}
+
 func TestAgentPodFollowsTheProjectSettings(t *testing.T) {
 	ns, _ := createProject(t, nil)
 	ctx := context.Background()

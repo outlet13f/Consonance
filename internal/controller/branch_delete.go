@@ -70,7 +70,11 @@ func (r *BranchReconciler) finalize(ctx context.Context, b *v1alpha1.Branch) (ct
 		logf.FromContext(ctx).Info("branch data deleted", "op", "delete")
 	}
 	controllerutil.RemoveFinalizer(b, BranchFinalizer)
-	return ctrl.Result{}, r.Update(ctx, b)
+	if err := r.Update(ctx, b); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.forget(client.ObjectKeyFromObject(b))
+	return ctrl.Result{}, nil
 }
 
 // dataToDelete reports whether the branch's data must be deleted through the agent. Not main's:

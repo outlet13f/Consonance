@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -12,11 +13,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"consonance/api/v1alpha1"
 	"consonance/internal/agentapi"
 	"consonance/internal/agentclient"
 	"consonance/internal/supervisorapi"
+	"consonance/internal/testutil/kubetest"
 )
 
 // readyProject makes a project whose main branch runs.
@@ -247,4 +251,93 @@ func TestADeletedPodIsMadeAgain(t *testing.T) {
 		return ""
 	})
 	waitPhase(t, ns, "dev", v1alpha1.BranchRunning)
+}
+
+// A pod the scheduler finds no node for is reported; its supervisor cannot answer.
+func TestAnUnschedulablePodIsReported(t *testing.T) {
+	ns, _ := readyProject(t)
+	createBranch(t, ns, "dev", "main")
+	waitPhase(t, ns, "dev", v1alpha1.BranchRunning)
+	ctx := context.Background()
+	key := client.ObjectKey{Namespace: ns, Name: "br-dev"}
+	var pod corev1.Pod
+	if err := kenv.Client.Get(ctx, key, &pod); err != nil {
+		t.Fatal(err)
+	}
+	old := pod.UID
+	if err := kenv.Client.Delete(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, func() string {
+		var p corev1.Pod
+		if err := kenv.Client.Get(ctx, key, &p); err != nil || p.UID == old {
+			return fmt.Sprintf("pod: %v", err)
+		}
+		return ""
+	})
+	const msg = "0/3 nodes are available: 3 Insufficient memory."
+	unschedule(t, ns, "br-dev", msg)
+	eventually(t, 10*time.Second, func() string {
+		if c := cond(getBranch(t, ns, "dev").Status.Conditions, v1alpha1.ConditionReady); c != "False/Unschedulable" {
+			return "Ready " + c
+		}
+		return ""
+	})
+	if c := meta.FindStatusCondition(getBranch(t, ns, "dev").Status.Conditions, v1alpha1.ConditionReady); c == nil || c.Message != msg {
+		t.Errorf("Ready %+v, want the scheduler's message", c)
+	}
+}
+
+// A pod the API server refuses (a full quota, say) is reported, and the error is retried.
+func TestAPodThatCannotBeMadeIsReported(t *testing.T) {
+	quota := errors.New(`pods "br-dev" is forbidden: exceeded quota: project-quota`)
+	c := fake.NewClientBuilder().WithScheme(kubetest.Scheme()).WithInterceptorFuncs(interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*corev1.Pod); ok {
+				return quota
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+	}).Build()
+	r := &BranchReconciler{Client: c, Scheme: c.Scheme(), PostgresImage: testPostgresImage}
+	b := testBranch("cns-x", "dev", "main")
+	ready, err := r.ensurePod(context.Background(), testProject("cns-x"), b)
+	if ready || !errors.Is(err, quota) {
+		t.Fatalf("ensurePod = %v, %v", ready, err)
+	}
+	if got := cond(b.Status.Conditions, v1alpha1.ConditionReady); got != "False/PodCreateFailed" {
+		t.Errorf("Ready %s", got)
+	}
+	if c := meta.FindStatusCondition(b.Status.Conditions, v1alpha1.ConditionReady); c == nil || c.Message != quota.Error() {
+		t.Errorf("Ready %+v, want the API server's message", c)
+	}
+}
+
+// A supervisor that does not answer is asked again later and later; one that answers, or a
+// deleted branch, starts afresh.
+func TestSupervisorWaitGrows(t *testing.T) {
+	r := &BranchReconciler{}
+	key := client.ObjectKey{Namespace: "cns-x", Name: "dev"}
+	var got []time.Duration
+	for range 6 {
+		got = append(got, r.supervisorWait(key))
+	}
+	want := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second}
+	if !slices.Equal(got, want) {
+		t.Errorf("waits %v, want %v", got, want)
+	}
+	r.supervisorAnswered(key)
+	if d := r.supervisorWait(key); d != 2*time.Second {
+		t.Errorf("after an answer: %s", d)
+	}
+
+	r.supervisorWait(key)
+	r.holdOff(key, time.Minute)
+	r.forget(key)
+	if d := r.heldOff(key); d != 0 {
+		t.Errorf("held off %s after forget", d)
+	}
+	if d := r.supervisorWait(key); d != 2*time.Second {
+		t.Errorf("after forget: %s", d)
+	}
 }

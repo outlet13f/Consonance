@@ -43,8 +43,9 @@ type BranchReconciler struct {
 	PostgresImage string
 	Now           func() time.Time // nil means time.Now
 
-	mu        sync.Mutex
-	notBefore map[client.ObjectKey]time.Time // a rate-limited branch is not tried again before this
+	mu         sync.Mutex
+	notBefore  map[client.ObjectKey]time.Time     // a rate-limited branch is not tried again before this
+	unanswered map[client.ObjectKey]time.Duration // a branch whose supervisor does not answer: the last wait
 }
 
 // holdOff keeps a branch from being tried again for d: a rate limit's Retry-After is honored
@@ -68,6 +69,38 @@ func (r *BranchReconciler) heldOff(key client.ObjectKey) time.Duration {
 		return 0
 	}
 	return d
+}
+
+// supervisorWait returns how long to wait before asking again a supervisor that did not answer:
+// waitShort, doubled with each further failure up to 30s, so dead nodes do not keep the workers.
+func (r *BranchReconciler) supervisorWait(key client.ObjectKey) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.unanswered == nil {
+		r.unanswered = map[client.ObjectKey]time.Duration{}
+	}
+	d := min(2*r.unanswered[key], 30*time.Second)
+	if d == 0 {
+		d = waitShort
+	}
+	r.unanswered[key] = d
+	return d
+}
+
+// supervisorAnswered resets the wait of supervisorWait.
+func (r *BranchReconciler) supervisorAnswered(key client.ObjectKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.unanswered, key)
+}
+
+// forget drops what is kept in memory about a deleted branch, so a new branch of the same name
+// starts afresh.
+func (r *BranchReconciler) forget(key client.ObjectKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.notBefore, key)
+	delete(r.unanswered, key)
 }
 
 func (r *BranchReconciler) now() time.Time {
@@ -115,6 +148,9 @@ func (r *BranchReconciler) branchesOf(match func(*v1alpha1.Branch) bool) handler
 func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var b v1alpha1.Branch
 	if err := r.Get(ctx, req.NamespacedName, &b); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.forget(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	id, _ := ProjectID(b.Namespace)
@@ -200,7 +236,7 @@ func (r *BranchReconciler) reconcile(ctx context.Context, p *v1alpha1.Project, b
 	}
 	b.Status.Endpoint = branchEndpoint(b)
 	if ready, err := r.ensurePod(ctx, p, b); !ready || err != nil {
-		return ctrl.Result{}, err // a pod being replaced: its deletion brings the branch back
+		return ctrl.Result{}, err // a pod being replaced or placed: its deletion or status change brings the branch back
 	}
 
 	// Step 4 (spec 9.4): a rollback or reset takes over while one is open; the state follows.
@@ -308,7 +344,8 @@ func (r *BranchReconciler) ensureService(ctx context.Context, b *v1alpha1.Branch
 }
 
 // ensurePod makes the branch's pod if it is missing and replaces one that ended (spec 7.1 step 2).
-// It reports whether a pod is there to talk to.
+// It reports whether a pod is there to talk to; a pod that cannot be made or placed sets Ready to
+// say why.
 func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b *v1alpha1.Branch) (bool, error) {
 	want := desiredBranchPod(p, b, r.PostgresImage)
 	var pod corev1.Pod
@@ -319,6 +356,7 @@ func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b
 			return false, err
 		}
 		if err := r.Create(ctx, want); err != nil {
+			setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, "PodCreateFailed", err.Error())
 			return false, err
 		}
 		return true, nil
@@ -330,16 +368,22 @@ func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b
 		logf.FromContext(ctx).Info("replacing the branch pod", "phase", pod.Status.Phase)
 		return false, client.IgnoreNotFound(r.Delete(ctx, &pod))
 	}
+	if c := unschedulable(&pod); c != nil {
+		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, "Unschedulable", c.Message)
+		return false, nil // no supervisor to call; the pod's status change brings the branch back
+	}
 	return true, nil
 }
 
 // ensureState brings PostgreSQL to spec.state (spec 7.1 step 3, 9.5).
 func (r *BranchReconciler) ensureState(ctx context.Context, b *v1alpha1.Branch, sup SupervisorAPI) (ctrl.Result, error) {
-	st, err := call(ctx, callTimeout, sup.Status)
-	if err != nil { // the pod is not up yet, or restarts
+	key := client.ObjectKeyFromObject(b)
+	st, err := call(ctx, statusTimeout, sup.Status)
+	if err != nil { // the pod is not up yet, or restarts, or its node is gone
 		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, "SupervisorUnavailable", err.Error())
-		return ctrl.Result{RequeueAfter: waitShort}, nil
+		return ctrl.Result{RequeueAfter: r.supervisorWait(key)}, nil
 	}
+	r.supervisorAnswered(key)
 	if n, ok := parseGeneration(st.Generation); ok {
 		b.Status.DataGeneration = int32(n)
 	}
