@@ -2,12 +2,15 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -127,4 +130,39 @@ func wantProblem(t *testing.T, resp *http.Response, body []byte, status int, typ
 		t.Fatalf("problem = %+v, want type %q status %d title %q and a detail", p, typ, status, http.StatusText(status))
 	}
 	return p
+}
+
+// readyProjectObjs is the namespace, the Ready Project and the Running main branch of project
+// id: what a request for a branch finds in a working project.
+func readyProjectObjs(id string) []client.Object {
+	objs := projectObjs(id, "ready", readyStatus())
+	return append(objs, &v1alpha1.Branch{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "cns-" + id, Name: v1alpha1.MainBranch},
+		Spec:       v1alpha1.BranchSpec{Protected: true, State: v1alpha1.StateRunning},
+		Status:     v1alpha1.BranchStatus{Phase: v1alpha1.BranchRunning, DataGeneration: 1},
+	})
+}
+
+// setBranchStatus changes the status of a branch the way the operator would. It is safe to call
+// from the goroutine of afterDelay.
+func setBranchStatus(t *testing.T, c client.Client, ns, name string, change func(*v1alpha1.BranchStatus)) {
+	t.Helper()
+	var b v1alpha1.Branch
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: name}, &b); err != nil {
+		t.Errorf("get branch %s: %v", name, err)
+		return
+	}
+	change(&b.Status)
+	if err := c.Status().Update(context.Background(), &b); err != nil {
+		t.Errorf("update status of branch %s: %v", name, err)
+	}
+}
+
+// afterDelay runs f in a goroutine after d, for a change the operator makes while a request
+// waits.
+func afterDelay(d time.Duration, f func()) {
+	go func() {
+		time.Sleep(d)
+		f()
+	}()
 }
