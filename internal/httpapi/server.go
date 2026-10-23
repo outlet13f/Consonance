@@ -102,7 +102,8 @@ func (s *server) endpoints() []endpoint {
 		{route{http.MethodGet, "/healthz", "healthz"}, s.healthz},
 	}
 	eps = append(eps, s.projectEndpoints()...)
-	return append(eps, s.branchEndpoints()...)
+	eps = append(eps, s.branchEndpoints()...)
+	return append(eps, s.restorePointEndpoints()...)
 }
 
 // routes lists the endpoints without their handlers.

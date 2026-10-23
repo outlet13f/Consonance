@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"consonance/api/v1alpha1"
+	"consonance/internal/agentapi"
 	"consonance/internal/controller"
 )
 
@@ -192,6 +193,9 @@ func (req *createBranchRequest) spec() (v1alpha1.BranchSpec, error) {
 	}
 	spec.Source = v1alpha1.BranchSource{Type: v1alpha1.SourceParentLatest}
 	if req.RestorePointID != "" {
+		if !agentapi.ValidRestorePointID(req.RestorePointID) {
+			return spec, badRequest("restorePointId %q is not the form rp-<yyyymmddThhmmssZ>-<4 characters>", req.RestorePointID)
+		}
 		spec.Source = v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: req.RestorePointID}
 	}
 	return spec, nil
@@ -268,6 +272,10 @@ func (s *server) createBranch(w http.ResponseWriter, r *http.Request) error {
 	if spec.Source.Type == v1alpha1.SourceParentLatest && parent.Status.Phase != v1alpha1.BranchRunning {
 		return conflict("parent %s is %s", parent.Name, branchPhase(parent))
 	}
+	// Its restore points go with it, so a copy from one of them would find the data gone.
+	if spec.Source.Type == v1alpha1.SourceRestorePoint && (parent.DeletionTimestamp != nil || parent.Status.Phase == v1alpha1.BranchDeleting) {
+		return conflict("parent %s is being deleted", parent.Name)
+	}
 
 	user, _, err := s.countBranches(ctx, ns)
 	if err != nil {
@@ -277,6 +285,14 @@ func (s *server) createBranch(w http.ResponseWriter, r *http.Request) error {
 		return &apiError{
 			Status: http.StatusTooManyRequests, Type: typeRateLimited, RetryAfter: branchRetryAfter,
 			Detail: fmt.Sprintf("the project has %d of %d branches", user, limit),
+		}
+	}
+
+	// The restore point has to be the parent's: the operator would only find out later, and
+	// the branch would exist, Failed, for the caller to delete.
+	if spec.Source.Type == v1alpha1.SourceRestorePoint {
+		if _, err := s.restorePointOf(ctx, ns, spec.Parent, spec.Source.RestorePointID); err != nil {
+			return err
 		}
 	}
 

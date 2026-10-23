@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
 
 	"consonance/internal/agentapi"
 	"consonance/internal/agentclient"
+	"consonance/internal/controller"
 )
 
 // AgentAPI is the part of a project's volume agent the API server calls itself (the rest of the
@@ -23,3 +25,14 @@ type AgentConnector interface {
 }
 
 var _ AgentAPI = (*agentclient.Client)(nil)
+
+// HTTPAgents reaches the agents through their services, from inside the cluster.
+type HTTPAgents struct {
+	HTTP *http.Client // nil gets the agent client's own, with a 60s timeout
+}
+
+func (a HTTPAgents) Agent(namespace, token string) AgentAPI {
+	return agentclient.New(controller.AgentURL(namespace), token, a.HTTP)
+}
+
+var _ AgentConnector = HTTPAgents{}

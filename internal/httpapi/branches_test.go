@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"consonance/api/v1alpha1"
+	"consonance/internal/agentapi"
 	"consonance/internal/controller"
 )
 
@@ -142,7 +143,8 @@ func TestCreateBranchAfterFiveSecondsIsAccepted(t *testing.T) {
 
 func TestCreateBranchFromRestorePoint(t *testing.T) {
 	objs := append(readyProjectObjs(testProject), branchObj("stopped", "main", v1alpha1.BranchStopped))
-	srv, c, _ := newTestServerWith(t, func(cfg *Config) { cfg.Waits.Create = 100 * time.Millisecond }, objs...)
+	srv, c, agents := newTestServerWith(t, func(cfg *Config) { cfg.Waits.Create = 100 * time.Millisecond }, objs...)
+	agents.add(testNS, agentapi.RestorePoint{ID: "rp-20261007T031500Z-ab12", Branch: "stopped"})
 	resp, body := call(t, srv, http.MethodPost, branchesURL, map[string]any{
 		"name": "dev", "parent": "stopped", "restorePointId": "rp-20261007T031500Z-ab12",
 	})
@@ -155,6 +157,48 @@ func TestCreateBranchFromRestorePoint(t *testing.T) {
 	b := getBranch(t, c, "dev")
 	if b.Spec.Source.Type != v1alpha1.SourceRestorePoint || b.Spec.Source.RestorePointID != "rp-20261007T031500Z-ab12" || b.Spec.Parent != "stopped" {
 		t.Errorf("spec = %+v", b.Spec)
+	}
+}
+
+// The restore point has to be one of the parent's, or the branch would be made and then fail.
+func TestCreateBranchFromAnUnknownRestorePointIsNotFound(t *testing.T) {
+	objs := append(readyProjectObjs(testProject), branchObj("dev", "main", v1alpha1.BranchRunning))
+	srv, c, agents := newTestServer(t, objs...)
+	const id = "rp-20261007T031500Z-ab12"
+	agents.addData(testNS, "main")
+	agents.add(testNS, agentapi.RestorePoint{ID: id, Branch: "dev"}) // a restore point, but not main's
+	resp, body := call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "new", "parent": "main", "restorePointId": id})
+	wantProblem(t, resp, body, http.StatusNotFound, typeNotFound)
+	var list v1alpha1.BranchList
+	if err := c.List(context.Background(), &list, client.InNamespace(testNS)); err != nil || len(list.Items) != 2 {
+		t.Errorf("branches = %d (%v), want the 2 there were", len(list.Items), err)
+	}
+}
+
+func TestCreateBranchFromARestorePointOfNoDataIsNotFound(t *testing.T) {
+	srv, c, _ := newTestServer(t, readyProjectObjs(testProject)...)
+	resp, body := call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "new", "restorePointId": "rp-20261007T031500Z-ab12"})
+	wantProblem(t, resp, body, http.StatusNotFound, typeNotFound)
+	var list v1alpha1.BranchList
+	if err := c.List(context.Background(), &list, client.InNamespace(testNS)); err != nil || len(list.Items) != 1 {
+		t.Errorf("branches = %d (%v), want main only", len(list.Items), err)
+	}
+}
+
+func TestCreateBranchFromARestorePointRejects(t *testing.T) {
+	deleting := branchObj("going", "main", v1alpha1.BranchDeleting)
+	objs := append(readyProjectObjs(testProject), deleting)
+	srv, _, agents := newTestServer(t, objs...)
+	const id = "rp-20261007T031500Z-ab12"
+	agents.add(testNS, agentapi.RestorePoint{ID: id, Branch: "going"})
+	resp, body := call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "new", "parent": "going", "restorePointId": id})
+	if p := wantProblem(t, resp, body, http.StatusConflict, typeConflict); !strings.Contains(p.Detail, "being deleted") {
+		t.Errorf("detail = %q", p.Detail)
+	}
+	resp, body = call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "new", "restorePointId": "rp-1"})
+	wantProblem(t, resp, body, http.StatusBadRequest, typeValidation)
+	if got := agents.seen(); len(got) != 0 {
+		t.Errorf("the agent was called %d times for requests refused before it", len(got))
 	}
 }
 

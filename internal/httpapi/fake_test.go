@@ -17,7 +17,7 @@ import (
 // AgentConnector, so a server under test talks to it instead of to agent pods.
 type fakeAgents struct {
 	mu     sync.Mutex
-	points map[string]map[string][]agentapi.RestorePoint // namespace -> branch -> restore points
+	points map[string]map[string][]agentapi.RestorePoint // namespace -> branch -> restore points; a branch with an entry has data
 	fail   map[string][]error                            // operation -> errors to return, in order
 	tokens []string                                      // the token of every Agent call, in order
 	seq    int
@@ -47,6 +47,19 @@ func (f *fakeAgents) restorePoints(namespace, branch string) []agentapi.RestoreP
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]agentapi.RestorePoint(nil), f.points[namespace][branch]...)
+}
+
+// addData gives a branch data and no restore points: until then the agent has none and answers
+// the list of its restore points with 404.
+func (f *fakeAgents) addData(namespace, branch string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.points[namespace] == nil {
+		f.points[namespace] = map[string][]agentapi.RestorePoint{}
+	}
+	if f.points[namespace][branch] == nil {
+		f.points[namespace][branch] = []agentapi.RestorePoint{}
+	}
 }
 
 // add puts a restore point into the agent of a namespace, as if an earlier request made it.
@@ -112,7 +125,11 @@ func (a *fakeAgent) ListRestorePoints(_ context.Context, branch string) ([]agent
 	if err := f.next("ListRestorePoints"); err != nil {
 		return nil, err
 	}
-	return append([]agentapi.RestorePoint{}, f.points[a.ns][branch]...), nil
+	list, ok := f.points[a.ns][branch]
+	if !ok {
+		return nil, &agentclient.APIError{StatusCode: http.StatusNotFound, Code: agentapi.CodeNotFound, Message: "branch " + branch + " has no data"}
+	}
+	return append([]agentapi.RestorePoint{}, list...), nil
 }
 
 func (a *fakeAgent) DeleteRestorePoint(_ context.Context, branch, id string) error {
@@ -140,8 +157,12 @@ func TestFakeAgents(t *testing.T) {
 	if err != nil || !agentapi.ValidRestorePointID(rp.ID) || rp.Label != "x" || rp.Branch != "main" {
 		t.Fatalf("CreateRestorePoint = %+v, %v", rp, err)
 	}
-	if got, _ := f.Agent("cns-bbbbbbbbbbbb", "other").ListRestorePoints(ctx, "main"); len(got) != 0 {
-		t.Errorf("another namespace sees %v", got)
+	if got, err := f.Agent("cns-bbbbbbbbbbbb", "other").ListRestorePoints(ctx, "main"); agentclient.CodeOf(err) != agentapi.CodeNotFound || len(got) != 0 {
+		t.Errorf("another namespace sees %v, %v; want the 404 of a branch without data", got, err)
+	}
+	f.addData("cns-bbbbbbbbbbbb", "main")
+	if got, err := f.Agent("cns-bbbbbbbbbbbb", "other").ListRestorePoints(ctx, "main"); err != nil || len(got) != 0 {
+		t.Errorf("a branch with data and no restore points lists %v, %v", got, err)
 	}
 	if got, _ := a.ListRestorePoints(ctx, "main"); len(got) != 1 || got[0].ID != rp.ID {
 		t.Errorf("ListRestorePoints = %v", got)
@@ -158,7 +179,7 @@ func TestFakeAgents(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotFound {
 		t.Errorf("deleting twice: %v, want the agent's 404", err)
 	}
-	if got := f.seen(); len(got) != 2 || got[0] != "tok" || got[1] != "other" {
+	if got := f.seen(); len(got) != 3 || got[0] != "tok" || got[1] != "other" || got[2] != "other" {
 		t.Errorf("seen = %v", got)
 	}
 }

@@ -10,17 +10,20 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"consonance/api/v1alpha1"
+	"consonance/internal/controller"
 	"consonance/internal/testutil/kubetest"
 )
 
 const (
 	testKey          = "test-key"
 	testStorageClass = "consonance-xfs"
+	testToken        = "internal-test-token" // the token in the internal-token Secret of a ready project
 )
 
 // newTestServer serves the API over a fake Kubernetes client (which is both Config.Client and
@@ -132,10 +135,14 @@ func wantProblem(t *testing.T, resp *http.Response, body []byte, status int, typ
 	return p
 }
 
-// readyProjectObjs is the namespace, the Ready Project and the Running main branch of project
-// id: what a request for a branch finds in a working project.
+// readyProjectObjs is the namespace, the Ready Project, its internal-token Secret and the
+// Running main branch of project id: what a request for a branch finds in a working project.
 func readyProjectObjs(id string) []client.Object {
 	objs := projectObjs(id, "ready", readyStatus())
+	objs = append(objs, &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "cns-" + id, Name: controller.InternalTokenSecret},
+		Data:       map[string][]byte{controller.TokenKey: []byte(testToken)},
+	})
 	return append(objs, &v1alpha1.Branch{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "cns-" + id, Name: v1alpha1.MainBranch},
 		Spec:       v1alpha1.BranchSpec{Protected: true, State: v1alpha1.StateRunning},
