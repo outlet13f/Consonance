@@ -2,11 +2,17 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"strconv"
 	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
+	"consonance/internal/agentapi"
+	"consonance/internal/agentclient"
 )
 
 // problemType is the "type" of an RFC 9457 problem: the values of the table in spec chapter 5.
@@ -46,6 +52,44 @@ func conflict(format string, args ...any) *apiError {
 
 func internal(err error) *apiError {
 	return &apiError{Status: http.StatusInternalServerError, Type: typeInternal, Detail: err.Error()}
+}
+
+// fromAgent turns an error of a volume agent call into a problem. The agent's code decides, not
+// its status: an answer that was not the agent's (a proxy's 404, say) has no code and is a 500,
+// like a network error. The agent's message is the detail.
+func fromAgent(err error) error {
+	var ae *agentclient.APIError
+	if !errors.As(err, &ae) {
+		return internal(err)
+	}
+	switch ae.Code {
+	case agentapi.CodeNotFound:
+		return notFound("%s", ae.Message)
+	case agentapi.CodeRateLimited:
+		// Retry-After is whole seconds, at least 1: 0 would tell the caller to retry at once.
+		retry := time.Duration(math.Max(1, math.Ceil(ae.RetryAfter.Seconds()))) * time.Second
+		return &apiError{Status: http.StatusTooManyRequests, Type: typeRateLimited, Detail: ae.Message, RetryAfter: retry}
+	case agentapi.CodeInsufficientStorage:
+		return &apiError{Status: http.StatusInsufficientStorage, Type: typeInsufficientStorage, Detail: ae.Message}
+	case agentapi.CodeNotRunning, agentapi.CodeConflict, agentapi.CodeBusy:
+		return conflict("%s", ae.Message)
+	case agentapi.CodeInvalid:
+		return badRequest("%s", ae.Message)
+	}
+	return internal(err)
+}
+
+// fromKube turns an error of the Kubernetes API into a problem.
+func fromKube(err error) error {
+	switch {
+	case apierrors.IsNotFound(err):
+		return notFound("%s", err.Error())
+	case apierrors.IsAlreadyExists(err), apierrors.IsConflict(err):
+		return conflict("%s", err.Error())
+	case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
+		return badRequest("%s", err.Error())
+	}
+	return internal(err)
 }
 
 // handlerFunc is a handler that reports failure by returning it; the router writes the problem.
