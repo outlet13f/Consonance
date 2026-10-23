@@ -4,12 +4,14 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"consonance/api/v1alpha1"
 	"consonance/internal/controller"
@@ -66,6 +68,40 @@ func TestCreateBranchWaitsForData(t *testing.T) {
 	}
 	if len(b.OwnerReferences) != 0 || b.Spec.Protected {
 		t.Errorf("a user branch has no owner and is not protected: %+v", b)
+	}
+}
+
+// The API server reads through an informer cache, which may not have the Branch it just made.
+func TestCreateBranchWaitsForTheCacheToSeeIt(t *testing.T) {
+	var created atomic.Bool
+	var misses atomic.Int32
+	srv, c, _ := newTestServerWith(t, func(cfg *Config) {
+		cfg.Client = interceptor.NewClient(cfg.Client.(client.WithWatch), interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				err := c.Create(ctx, obj, opts...)
+				if _, ok := obj.(*v1alpha1.Branch); ok && err == nil {
+					created.Store(true)
+				}
+				return err
+			},
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*v1alpha1.Branch); ok && key.Name == "dev" && created.Load() && misses.Add(1) <= 2 {
+					return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("branches").GroupResource(), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+	}, readyProjectObjs(testProject)...)
+	setBranchStatus := func() {
+		setBranchStatus(t, c, testNS, "dev", func(s *v1alpha1.BranchStatus) { s.DataGeneration = 1 })
+	}
+	afterDelay(100*time.Millisecond, setBranchStatus)
+	resp, body := call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "dev"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body %s", resp.StatusCode, body)
+	}
+	if n := misses.Load(); n < 3 {
+		t.Errorf("only %d Gets of the new branch: the cache miss was not exercised", n)
 	}
 }
 
@@ -146,6 +182,8 @@ func TestCreateBranchRejects(t *testing.T) {
 		"same name":         {map[string]any{"name": "taken"}, 409, typeConflict},
 		"main":              {map[string]any{"name": "main"}, 409, typeConflict},
 		"main with a state": {map[string]any{"name": "main", "state": "Stopped"}, 409, typeConflict},
+		"main, bad state":   {map[string]any{"name": "main", "state": "Paused"}, 409, typeConflict},
+		"main, bad parent":  {map[string]any{"name": "main", "parent": "Main"}, 409, typeConflict},
 	} {
 		t.Run(name, func(t *testing.T) {
 			resp, b := call(t, srv, http.MethodPost, branchesURL, tc.body)
@@ -245,6 +283,47 @@ func TestCreateBranchPermanentFailure(t *testing.T) {
 				t.Errorf("phase = %q", b.Status.Phase)
 			}
 		})
+	}
+}
+
+func TestCreateBranchFailedWithoutDataIsAnError(t *testing.T) {
+	srv, c, _ := newTestServer(t, readyProjectObjs(testProject)...)
+	afterDelay(200*time.Millisecond, func() {
+		setBranchStatus(t, c, testNS, "dev", func(s *v1alpha1.BranchStatus) {
+			s.Phase = v1alpha1.BranchFailed
+			s.Conditions = []metav1.Condition{{
+				Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonPodCreateFailed, Message: "no pod",
+			}}
+		})
+	})
+	start := time.Now()
+	resp, body := call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "dev"})
+	p := wantProblem(t, resp, body, http.StatusInternalServerError, typeInternal)
+	if !strings.Contains(p.Detail, "PodCreateFailed") || !strings.Contains(p.Detail, "no pod") || !strings.Contains(p.Detail, "dev") {
+		t.Errorf("detail = %q, want the branch, the reason and the message", p.Detail)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Errorf("took %v: the failure ends the wait", time.Since(start))
+	}
+}
+
+func TestCreateBranchFailedToStartHasData(t *testing.T) {
+	srv, c, _ := newTestServer(t, readyProjectObjs(testProject)...)
+	afterDelay(200*time.Millisecond, func() {
+		setBranchStatus(t, c, testNS, "dev", func(s *v1alpha1.BranchStatus) {
+			s.Phase = v1alpha1.BranchFailed
+			s.DataGeneration = 1
+			s.Conditions = []metav1.Condition{{
+				Type: v1alpha1.ConditionReady, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonStartFailed, Message: "postgres exited",
+			}}
+		})
+	})
+	resp, body := call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "dev"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (the data is there); body %s", resp.StatusCode, body)
+	}
+	if v := decode[branchView](t, body); v.Phase != "Failed" || v.Reason != "StartFailed" || v.Message != "postgres exited" {
+		t.Errorf("view = %+v", v)
 	}
 }
 

@@ -174,12 +174,9 @@ func (s *server) countBranches(ctx context.Context, ns string) (user, backups in
 	return user, backups, nil
 }
 
-// spec checks the request and returns the Branch spec it asks for, with the defaults filled in.
+// spec checks the request, but for the name (createBranch does that first), and returns the Branch spec it asks for, with the defaults filled in.
 func (req *createBranchRequest) spec() (v1alpha1.BranchSpec, error) {
 	spec := v1alpha1.BranchSpec{Parent: req.Parent, State: v1alpha1.StateRunning}
-	if err := validBranchName(req.Name); err != nil {
-		return spec, err
-	}
 	if spec.Parent == "" {
 		spec.Parent = v1alpha1.MainBranch
 	}
@@ -213,6 +210,19 @@ func permanentDataError(b *v1alpha1.Branch, c *metav1.Condition) error {
 	return conflict("branch %s failed (%s): %s", b.Name, c.Reason, c.Message)
 }
 
+// failedWithoutData is the problem for a Failed branch that has no data: a permanent data
+// failure by its reason, and otherwise an internal error, because the operator will not go on.
+func failedWithoutData(b *v1alpha1.Branch) error {
+	c := falseCondition(b, v1alpha1.ConditionDataReady, v1alpha1.ConditionReady)
+	switch {
+	case c == nil:
+		return internal(fmt.Errorf("branch %s failed", b.Name))
+	case v1alpha1.PermanentDataFailure(c.Reason) && c.Type == v1alpha1.ConditionDataReady:
+		return permanentDataError(b, c)
+	}
+	return internal(fmt.Errorf("branch %s failed (%s): %s", b.Name, c.Reason, c.Message))
+}
+
 func (s *server) createBranch(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	id := r.PathValue("projectId")
@@ -221,13 +231,17 @@ func (s *server) createBranch(w http.ResponseWriter, r *http.Request) error {
 	if err := decodeBody(r, &req); err != nil {
 		return err
 	}
-	spec, err := req.spec()
-	if err != nil {
+	if err := validBranchName(req.Name); err != nil {
 		return err
 	}
 	logAttrs(ctx, "branch", req.Name)
+	// main is the one name that is taken in every project, whatever else the request says.
 	if req.Name == v1alpha1.MainBranch {
 		return conflict("branch %s exists already", req.Name)
+	}
+	spec, err := req.spec()
+	if err != nil {
+		return err
 	}
 	p, err := s.readyProject(ctx, id)
 	if err != nil {
@@ -273,17 +287,20 @@ func (s *server) createBranch(w http.ResponseWriter, r *http.Request) error {
 
 	var failure error
 	ready, err := waitFor(ctx, s.waits.Create, func(ctx context.Context) (bool, error) {
-		if err := s.client.Get(ctx, client.ObjectKeyFromObject(b), b); err != nil {
+		// The cache may not have the Branch yet, or no longer (a delete in between): either
+		// way it is not ready, and the answer is 202.
+		switch err := s.client.Get(ctx, client.ObjectKeyFromObject(b), b); {
+		case apierrors.IsNotFound(err):
+			return false, nil
+		case err != nil:
 			return false, fromKube(err)
 		}
 		if b.Status.DataGeneration > 0 {
 			return true, nil
 		}
 		if b.Status.Phase == v1alpha1.BranchFailed {
-			if c := falseCondition(b, v1alpha1.ConditionDataReady); c != nil && v1alpha1.PermanentDataFailure(c.Reason) {
-				failure = permanentDataError(b, c)
-				return true, nil
-			}
+			failure = failedWithoutData(b)
+			return true, nil
 		}
 		return false, nil
 	})
