@@ -109,7 +109,7 @@ status:
     pvcName: project-volume
     capacityBytes: 10737418240
     usedBytes: 1105475251
-  conditions:                # VolumeReady, AgentReady, ReflinkSupported, MainReady
+  conditions:                # VolumeReady, AgentReady, ReflinkSupported, MainReady, 이를 요약한 Ready
     - type: ReflinkSupported
       status: "True"
 ```
@@ -269,7 +269,7 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 2. 브랜치 파드 `br-<name>`과 Service `br-<name>`을 맞춘다(Branch가 소유). 파드가 사라지면 다시 만든다.
 3. `spec.state`와 감독 프로세스 상태가 다르면 `POST /v1/start` 또는 `/v1/stop`을 호출한다.
 4. `spec.restore.requestId`가 `status.lastRestore.requestId`와 다르면 9.4의 롤백·리셋 절차를 단계별로 진행하고, 단계마다 `status.lastRestore.phase`를 기록한다(중간에 오퍼레이터가 재시작해도 이어서 진행).
-5. 삭제 시 파이널라이저(`consonance.io/branch-cleanup`)에서 파드·Service를 지우고, 파드 객체가 사라진 뒤 에이전트 `DELETE /v1/branches/{name}/data`를 호출하고 파이널라이저를 뗀다. main의 데이터는 지우지 않고(Project 조정이 main Branch를 다시 만든다), Project가 없거나 삭제 중이면 에이전트를 부르지 않는다(네임스페이스 삭제가 볼륨을 가져간다). 롤백이 Detaching 단계일 때 지워지면, 에이전트가 이미 옮긴 옛 데이터는 백업 브랜치 Branch를 만들어 남기고, 아직 옮기지 않았으면 브랜치와 함께 지운다.
+5. 삭제 시 파이널라이저(`consonance.io/branch-cleanup`)에서 파드·Service를 지우고, 파드 객체가 사라진 뒤 에이전트 `DELETE /v1/branches/{name}/data`를 호출하고 파이널라이저를 뗀다. main의 데이터는 지우지 않고(Project 조정이 main Branch를 다시 만든다), Project가 없거나 삭제 중이면(네임스페이스 삭제가 볼륨을 가져간다), reflink 점검을 통과한 적이 없으면(데이터가 있을 수 없다) 에이전트를 부르지 않는다. main이 아닌 브랜치가 롤백의 Detaching 단계일 때 지워지면, 에이전트가 이미 옮긴 옛 데이터는 백업 브랜치 Branch를 만들어 남기고, 아직 옮기지 않았으면 브랜치와 함께 지운다.
 
 ### 7.2 볼륨 에이전트 (`cmd/agent`, `internal/volume`)
 
@@ -331,6 +331,7 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - 에이전트 파드: `fsGroup: 999`, `fsGroupChangePolicy: OnRootMismatch`(대용량 볼륨에서 재귀 chown 방지). 자원 100m/128Mi.
 - 브랜치 파드: 볼륨 subPath `branches/<name>` → `/pgdata`, emptyDir → `/var/run/postgresql`, Secret `internal-token`, main만 Secret `db-credentials`. 자원은 Branch compute.
 - 같은 PVC(RWO)를 쓰므로 브랜치 파드는 에이전트 파드와 같은 노드에 둔다(필수 podAffinity, `kubernetes.io/hostname`).
+- 에이전트 파드를 새로 만들 때 실행 중인 브랜치 파드가 있으면 그 노드에 둔다(필수 nodeAffinity, `kubernetes.io/hostname`). 네트워크 RWO 볼륨은 붙어 있는 노드를 떠날 수 없다.
 - 브랜치 Service `br-<이름>`은 5432와 8008을 노출하고 `publishNotReadyAddresses: true`다. PostgreSQL이 정지해 파드가 준비되지 않아도 오퍼레이터와 에이전트가 감독 프로세스에 닿아야 한다.
 - 파드는 서비스 계정 토큰을 마운트하지 않고, `terminationGracePeriodSeconds`는 45초다(감독 프로세스의 30초 fast shutdown, 에이전트의 25초 요청 대기).
 

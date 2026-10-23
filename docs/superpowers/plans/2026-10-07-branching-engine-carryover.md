@@ -110,6 +110,11 @@ VM·이미지:
 - `spec.restore`는 요청 하나만 담는다. 진행 중인 요청이 끝나기 전에 두 번 쓰면 그사이에 쓴 요청은 수행되지 않는다. API는 진행 중인 요청이 있으면 새 요청을 409로 막는다. main 리셋도 409로 막는다(오퍼레이터는 에이전트를 부르기 전에 Failed로 끝낸다).
 - 접속 정보는 Secret `db-credentials`(`username`·`password`·`database`)와 Branch `status.endpoint`에서 온다.
 - main Branch 객체를 지우면 오퍼레이터가 데이터는 둔 채 다시 만든다. main 삭제는 API가 409로 막는다.
+- 롤백이 만든 백업 브랜치는 정지 상태로도 파드를 두므로 파드 쿼터(`2 × maxBranches + 1`)와 노드 자원을 쓴다. 롤백을 거듭하면 쿼터나 노드가 차서 새 브랜치의 파드가 만들어지지 않는다(조건 `Ready=False`, 이유 `PodCreateFailed`·`Unschedulable`). 백업 브랜치를 개수에 넣거나 정리 정책을 둔다.
+- 리셋도 부모가 실행 중이어야 한다(아니면 409). 오퍼레이터는 부모가 실행될 때까지 기다리고, 그동안 리셋을 취소할 방법이 없다.
+- 백업 브랜치 이름 형식(`<이름>-before-<14자리 숫자>`)은 사용자가 쓰지 못하게 막는다. 롤백이 이름을 고른 뒤 같은 이름의 브랜치가 생기면 옮긴 데이터를 그 브랜치가 가져간다.
+- 브랜치 조건 `Ready`의 이유는 참이면 `Running`·`Stopped`, 거짓이면 `SupervisorUnavailable`·`StartFailed`·`Unschedulable`·`PodCreateFailed`다. 프로젝트 조건 `AgentReady`의 거짓 이유는 `AgentUnavailable`·`Unschedulable`·`AgentPodFailed`다. 영구 실패 이유 넷 말고는 내보낸 상수가 아니므로, API가 맞춰 보려면 `api/v1alpha1`로 옮긴다. Project phase `Pending`(스펙 4.2)은 쓰이지 않는다.
+- `storage.storageClassName`에는 CRD 기본값이 없어 비우면 클러스터 기본 클래스를 쓴다. k3s 기본(local-path)은 reflink가 없어 프로젝트가 영구 실패한다. API 기본값이나 오퍼레이터 플래그 중 하나로 정한다(계획 5의 `consonance-xfs`와 함께).
 
 ### 계획 5(배포·E2E·성능)가 반영할 것
 
@@ -121,4 +126,37 @@ VM·이미지:
 - 에이전트 파드의 CPU 한도(100m)에서 initdb 시간을 잰다. 오퍼레이터의 init-main 호출 제한은 5분이다.
 - 개발용 스토리지 클래스 `consonance-xfs`(XFS + reflink)를 만든다. envtest는 PVC를 바인딩하지 않으므로 볼륨 바인딩과 `VolumeReady`는 E2E에서 처음 확인된다.
 - 오퍼레이터는 SIGTERM을 받으면 진행 중인 조정의 컨텍스트를 취소하고 끝나기를 기다린다(최대 30초). 끊긴 단계는 재시작 뒤 status에서 이어서 한다.
-- 매니페스트를 내기 전에 ClusterRole에서 쓰지 않는 권한을 줄인다. 대상은 Secret·PVC의 update·patch·delete, 파드의 update·patch, Service의 patch, 쿼터·네트워크 정책의 patch·delete, Branch의 patch·delete, status의 get·patch, 리스의 list·watch·patch·delete다. 리스와 이벤트 권한은 `consonance-system`의 Role로 옮긴다. 줄인 뒤 `cmd/operator`의 테스트를 돌린다. 그 테스트는 오퍼레이터 역할로 각 경로를 확인한다. 클러스터 밖에서 리더 선출을 켜려면 `--leader-election-namespace` 플래그가 필요하다.
+- 매니페스트를 내기 전에 ClusterRole에서 쓰지 않는 권한을 줄인다. 대상은 Secret·PVC의 update·patch·delete, 파드의 update·patch, Service의 patch, 쿼터·네트워크 정책의 patch·delete, Branch의 patch·delete, status의 get·patch, 리스의 list·watch·patch·delete다. 리스와 이벤트 권한은 `consonance-system`의 Role로 옮긴다. 줄인 뒤 `cmd/operator`의 테스트를 돌린다. 그 테스트는 오퍼레이터 역할로 각 경로를 확인한다. 클러스터 밖에서 리더 선출을 켜려면 `--leader-election-namespace` 플래그를 추가해야 한다.
+- 브랜치 파드가 실행 중일 때 에이전트 파드를 바꾸는 경우(이미지 변경)를 네트워크 RWO 스토리지 클래스에서 E2E로 확인한다. 오퍼레이터는 새 에이전트 파드를 실행 중인 브랜치 파드의 노드에 둔다(필수 nodeAffinity).
+- 노드 장애를 넣어 조정 지연을 잰다. 응답 없는 감독 프로세스는 2초 제한으로 묻고, 2초에서 30초까지 늘려 가며 다시 묻는다.
+
+### 미뤄 둔 개선 사항
+
+조정·상태:
+
+- 롤백·리셋의 단계 저장(`saveStatus`) 충돌과 에이전트 `busy`는 아직 ERROR 수준 로그로 남는다(조정 끝의 status 충돌은 오류로 보지 않게 고쳤다).
+- Project 감시와 `For(Branch)`에 조건자가 없다. 1분마다 바뀌는 사용량을 Project status에 쓰면 그 네임스페이스의 모든 브랜치가 깨어 감독 프로세스 상태를 묻는다.
+- 응답 없는 에이전트(preflight·사용량)는 2초 간격으로 다시 묻는다(스펙 10장은 지수 백오프). 사용량을 한 번 못 받으면 Ready 프로젝트가 Provisioning으로 바뀐다.
+- `ObservedGeneration`은 서비스·파드 단계가 실패해도 올라간다. 파드를 다시 만드는 동안과 정지하는 동안에도 phase가 Running으로 남고, 롤백·리셋 중에도 `Ready`가 참으로 남는다.
+- 파드 삭제에 UID 전제 조건이 없고, 파드가 사라졌는지는 캐시로 본다(만든 직후에 지우면 NotFound가 증거가 아니다). 삭제가 멈춰 있을 때 조건·메시지가 없고, 건너뛴 데이터 삭제를 로그에 남기지 않는다. 파이널라이저를 뗀 뒤의 갱신이 오래된 캐시로 NotFound를 한 번 남긴다.
+- 복사가 끝난 뒤 status 쓰기를 잃으면 `BackupStartLSN`이 빈 값으로 남는다. 시작·정지 로그에 `op`가 없다(스펙 11장).
+
+롤백·리셋:
+
+- `lastRestore.phase`가 비었거나 모르는 값이면 단계 함수가 없어 패닉을 되풀이하고(PostgreSQL이 멈춘 채 남을 수 있다), `restoreDetach`는 `StartedAt`·`BackupBranch`를 확인 없이 쓴다. 손으로 고친 status에서만 생긴다. 단계에 enum을 두고 모르는 단계는 Failed로 끝낸다.
+- 기동이 409·503·500이 아닌 오류로 실패해도 되돌린다. 세대 불일치의 409는 끝없이 기다린다.
+- Detaching의 409를 모두 "이름이 있다"로 본다(에이전트는 현재 세대·실행 중인 세대에도 409를 준다). 그러면 1분쯤 뒤 Failed로 끝나 옛 세대가 남는다. `ensureBackupBranch`는 삭제 중인 Branch도 받아들인다. 이름을 찾는 제한은 1분이 아니라 약 2분이다.
+- main Branch 객체를 롤백의 Detaching 중에 지우면(kubectl로만 가능) 옮긴 데이터가 Branch 없이 남는다. main이나 Project를 롤백 중에 지우면 `lastRestore`가 사라진다.
+
+실행 파일·권한:
+
+- `--kubeconfig` 경로는 client-go 기본값(5 QPS)을 쓴다. 신호 처리기를 매니저를 만든 뒤에 단다. `LeaderElectionReleaseOnCancel`을 켜지 않는다. 플래그 오류는 JSON 처리기를 달기 전에 텍스트로 남고 종료 코드가 1이다. readyz가 캐시 동기화를 기다리지 않는다.
+
+테스트:
+
+- 시험하지 않는 경로: 사용량 실패, `BootstrapFailed`, `MainNotRunning`, 1분 사용량 갱신, main 다시 만들기, 삭제 중인 Project에서 브랜치 데이터 건너뛰기, 부모 변경 깨우기(2초 다시 보기와 구분되지 않는다), `parseGeneration` 경계, `permanentDataFailure`의 507·501·400.
+- `TestProjectWaitsForItsAgent`는 2초 다시 보기와 `AgentUnavailable`을 고정하지 않는다. 업데이트 루프 확인은 1초 sleep에 기대고 Project의 resourceVersion을 보지 않는다. `project_controller_test.go`의 한 실패 메시지는 조건이 없으면 패닉한다.
+- `TestEachRequestRunsOnce`는 두 롤백이 같은 초에 끝날 때만 이름 충돌을 시험한다. 단계 저장을 빼거나 이름 바꾸기 경로를 고치는 변이는 테스트가 잡지 못한다.
+- `TestDeletingABranchWaitsForItsPodToGo`는 Fatal로 끝나면 파드의 테스트 파이널라이저를 남긴다. envtest의 ClusterIP 범위 때문에 internal/controller를 `-count` 3 넘게 돌릴 수 없다.
+- 오퍼레이터 테스트: `http.Get`에 시간 제한이 없고, 기한 20초가 preflight 제한 10초와 가깝고, 바이너리를 두 번 빌드하고, JSON 확인이 부분 문자열이고, 메트릭을 끈 것을 확인하지 않는다.
+- 가짜 에이전트: 멈춘 PostgreSQL의 Bootstrap이 409(실제는 500), 데이터 없는 Status가 `data-0`(실제는 ""), PostgreSQL 상태를 파드 UID에 묶지 않고, 입력을 검사하지 않고, 종료 중인 파드를 응답 없음으로 보고, 파드 Get 오류를 파드 없음으로 본다. `loseAnswers`는 DetachGeneration만 따른다.
