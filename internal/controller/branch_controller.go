@@ -219,7 +219,7 @@ func (r *BranchReconciler) token(ctx context.Context, ns string) (string, error)
 
 func (r *BranchReconciler) reconcile(ctx context.Context, p *v1alpha1.Project, b *v1alpha1.Branch, token string) (ctrl.Result, error) {
 	if c := meta.FindStatusCondition(b.Status.Conditions, v1alpha1.ConditionDataReady); c != nil &&
-		c.Status == metav1.ConditionFalse && permanentDataFailure(c.Reason) {
+		c.Status == metav1.ConditionFalse && v1alpha1.PermanentDataFailure(c.Reason) {
 		return ctrl.Result{}, nil // spec 10: a permanent failure stays failed
 	}
 
@@ -254,15 +254,6 @@ func (r *BranchReconciler) reconcile(ctx context.Context, p *v1alpha1.Project, b
 	return r.ensureState(ctx, b, sup)
 }
 
-// permanentDataFailure reports a DataReady reason that retrying cannot fix (spec 10).
-func permanentDataFailure(reason string) bool {
-	switch reason {
-	case ReasonReflinkUnsupported, ReasonInsufficientStorage, ReasonSourceNotFound, ReasonInvalid:
-		return true
-	}
-	return false
-}
-
 // ensureData makes the branch's data: main's with init-main (spec 7.1 step 5: main's data is
 // made only there), any other's by copying its parent or a restore point. Both calls are safe to
 // repeat: a retry answers with the data made already.
@@ -272,7 +263,7 @@ func (r *BranchReconciler) ensureData(ctx context.Context, b *v1alpha1.Branch, a
 	if isMain(b) {
 		g, err := call(ctx, initTimeout, agent.InitMain)
 		if err != nil {
-			return r.dataFailed(b, err, "InitMainFailed")
+			return r.dataFailed(b, err, v1alpha1.ReasonInitMainFailed)
 		}
 		gen = g.Generation
 	} else {
@@ -284,7 +275,7 @@ func (r *BranchReconciler) ensureData(ctx context.Context, b *v1alpha1.Branch, a
 			return agent.CreateBranchData(ctx, b.Name, req)
 		})
 		if err != nil {
-			return r.dataFailed(b, err, "CopyFailed")
+			return r.dataFailed(b, err, v1alpha1.ReasonCopyFailed)
 		}
 		gen = d.Generation
 		if b.Status.CreatedFrom == nil {
@@ -309,7 +300,7 @@ func (r *BranchReconciler) ensureData(ctx context.Context, b *v1alpha1.Branch, a
 func (r *BranchReconciler) dataFailed(b *v1alpha1.Branch, err error, reason string) (ctrl.Result, error) {
 	permanent := permanentReason(err)
 	if permanent == "" && !isMain(b) && agentCode(err) == agentapi.CodeNotFound {
-		permanent = ReasonSourceNotFound // no parent data, or no such restore point
+		permanent = v1alpha1.ReasonSourceNotFound // no parent data, or no such restore point
 	}
 	if permanent != "" {
 		b.Status.Phase = v1alpha1.BranchFailed
@@ -318,7 +309,7 @@ func (r *BranchReconciler) dataFailed(b *v1alpha1.Branch, err error, reason stri
 		return ctrl.Result{}, nil
 	}
 	if agentCode(err) == agentapi.CodeNotRunning {
-		reason = "ParentNotRunning"
+		reason = v1alpha1.ReasonParentNotRunning
 	}
 	setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionDataReady, false, reason, err.Error())
 	return r.retryLater(b, err)
@@ -359,7 +350,7 @@ func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b
 			return false, err
 		}
 		if err := r.Create(ctx, want); err != nil {
-			setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, "PodCreateFailed", err.Error())
+			setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, v1alpha1.ReasonPodCreateFailed, err.Error())
 			return false, err
 		}
 		return true, nil
@@ -372,7 +363,7 @@ func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b
 		return false, client.IgnoreNotFound(r.Delete(ctx, &pod))
 	}
 	if c := unschedulable(&pod); c != nil {
-		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, "Unschedulable", c.Message)
+		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, v1alpha1.ReasonUnschedulable, c.Message)
 		return false, nil // no supervisor to call; the pod's status change brings the branch back
 	}
 	return true, nil
@@ -383,7 +374,7 @@ func (r *BranchReconciler) ensureState(ctx context.Context, b *v1alpha1.Branch, 
 	key := client.ObjectKeyFromObject(b)
 	st, err := call(ctx, statusTimeout, sup.Status)
 	if err != nil { // the pod is not up yet, or restarts, or its node is gone
-		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, "SupervisorUnavailable", err.Error())
+		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, v1alpha1.ReasonSupervisorUnavailable, err.Error())
 		return ctrl.Result{RequeueAfter: r.supervisorWait(key)}, nil
 	}
 	r.supervisorAnswered(key)
@@ -434,7 +425,7 @@ func (r *BranchReconciler) ensureState(ctx context.Context, b *v1alpha1.Branch, 
 	case supervisorStatus(err) != 0:
 		// PostgreSQL did not start on this data (500). Tried again with backoff.
 		b.Status.Phase = v1alpha1.BranchFailed
-		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, "StartFailed", err.Error())
+		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, v1alpha1.ReasonStartFailed, err.Error())
 	}
 	return ctrl.Result{}, err
 }

@@ -155,7 +155,7 @@ func (r *ProjectReconciler) reconcile(ctx context.Context, p *v1alpha1.Project) 
 	// Step 3: the agent.
 	scheduled, err := r.ensureAgent(ctx, p, id)
 	if err != nil {
-		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, "AgentPodFailed", err.Error())
+		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, v1alpha1.ReasonAgentPodFailed, err.Error())
 		return ctrl.Result{}, err
 	}
 	if !scheduled {
@@ -171,12 +171,12 @@ func (r *ProjectReconciler) reconcile(ctx context.Context, p *v1alpha1.Project) 
 		}
 		pre, err := call(ctx, callTimeout, agent.Preflight)
 		if err != nil {
-			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, "AgentUnavailable", err.Error())
+			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, v1alpha1.ReasonAgentUnavailable, err.Error())
 			return ctrl.Result{RequeueAfter: waitShort}, nil
 		}
 		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, true, "Answers", "")
 		if !pre.Reflink {
-			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionReflinkSupported, false, ReasonReflinkUnsupported, pre.Error)
+			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionReflinkSupported, false, v1alpha1.ReasonReflinkUnsupported, pre.Error)
 			return ctrl.Result{}, nil
 		}
 		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionReflinkSupported, true, "Supported", "kernel "+pre.Kernel)
@@ -191,12 +191,12 @@ func (r *ProjectReconciler) reconcile(ctx context.Context, p *v1alpha1.Project) 
 	// Step 6: the tenant login, once main first runs. Bootstrap skips what exists.
 	if !meta.IsStatusConditionTrue(p.Status.Conditions, v1alpha1.ConditionMainReady) {
 		if main.Status.Phase != v1alpha1.BranchRunning {
-			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionMainReady, false, "MainNotRunning", "main is "+phaseOrNone(main.Status.Phase))
+			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionMainReady, false, v1alpha1.ReasonMainNotRunning, "main is "+phaseOrNone(main.Status.Phase))
 			return ctrl.Result{}, nil // the main Branch watch brings the project back
 		}
 		sup := r.Connector.Supervisor(p.Namespace, v1alpha1.MainBranch, token)
 		if _, err := call(ctx, bootstrapTimeout, sup.Bootstrap); err != nil {
-			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionMainReady, false, "BootstrapFailed", err.Error())
+			setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionMainReady, false, v1alpha1.ReasonBootstrapFailed, err.Error())
 			return ctrl.Result{}, err
 		}
 		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionMainReady, true, "Bootstrapped", "")
@@ -206,7 +206,7 @@ func (r *ProjectReconciler) reconcile(ctx context.Context, p *v1alpha1.Project) 
 	// still answers.
 	u, err := call(ctx, callTimeout, agent.Usage)
 	if err != nil {
-		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, "AgentUnavailable", err.Error())
+		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, v1alpha1.ReasonAgentUnavailable, err.Error())
 		return ctrl.Result{RequeueAfter: waitShort}, nil
 	}
 	setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, true, "Answers", "")
@@ -305,7 +305,7 @@ func (r *ProjectReconciler) ensureAgent(ctx context.Context, p *v1alpha1.Project
 				return true, client.IgnoreNotFound(r.Delete(ctx, &pod))
 			}
 		}
-		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, "Unschedulable", c.Message)
+		setCondition(&p.Status.Conditions, p.Generation, v1alpha1.ConditionAgentReady, false, v1alpha1.ReasonUnschedulable, c.Message)
 		return false, nil
 	}
 	return true, nil
@@ -374,12 +374,12 @@ func summarize(p *v1alpha1.Project) {
 	}
 	if _, ok := ProjectID(p.Namespace); !ok {
 		p.Status.Phase = v1alpha1.ProjectFailed
-		ready(false, "InvalidNamespace", "a Project lives in a namespace named cns-<projectId>")
+		ready(false, v1alpha1.ReasonInvalidNamespace, "a Project lives in a namespace named cns-<projectId>")
 		return
 	}
 	if c := meta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionReflinkSupported); c != nil && c.Status == metav1.ConditionFalse {
 		p.Status.Phase = v1alpha1.ProjectFailed
-		ready(false, ReasonReflinkUnsupported, c.Message)
+		ready(false, v1alpha1.ReasonReflinkUnsupported, c.Message)
 		return
 	}
 	var waiting []string

@@ -7,17 +7,10 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"consonance/api/v1alpha1"
 	"consonance/internal/agentapi"
 	"consonance/internal/agentclient"
 	"consonance/internal/supervisorclient"
-)
-
-// Condition reasons of permanent failures (spec 10: phase Failed, the reason recorded).
-const (
-	ReasonReflinkUnsupported  = "ReflinkUnsupported"
-	ReasonInsufficientStorage = "InsufficientStorage"
-	ReasonSourceNotFound      = "SourceNotFound"
-	ReasonInvalid             = "Invalid"
 )
 
 // agentCode is the error code of an agent error, "" for any other error.
@@ -43,11 +36,11 @@ func stillStarting(err error) bool { return supervisorStatus(err) == http.Status
 func permanentReason(err error) string {
 	switch agentCode(err) {
 	case agentapi.CodeReflinkUnsupported:
-		return ReasonReflinkUnsupported
+		return v1alpha1.ReasonReflinkUnsupported
 	case agentapi.CodeInsufficientStorage:
-		return ReasonInsufficientStorage
+		return v1alpha1.ReasonInsufficientStorage
 	case agentapi.CodeInvalid:
-		return ReasonInvalid
+		return v1alpha1.ReasonInvalid
 	}
 	return ""
 }

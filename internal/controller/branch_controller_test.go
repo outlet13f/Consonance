@@ -161,7 +161,7 @@ func TestBranchFromAMissingRestorePointFails(t *testing.T) {
 		b.Spec.Source = v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: "rp-20261007T031500Z-zzzz"}
 	})
 	b := waitPhase(t, ns, "lost", v1alpha1.BranchFailed)
-	if c := cond(b.Status.Conditions, v1alpha1.ConditionDataReady); c != "False/"+ReasonSourceNotFound {
+	if c := cond(b.Status.Conditions, v1alpha1.ConditionDataReady); c != "False/"+v1alpha1.ReasonSourceNotFound {
 		t.Errorf("DataReady %s", c)
 	}
 	n := countCalls(fp, "CreateBranchData(lost") // a permanent failure is not retried

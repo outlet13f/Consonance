@@ -9,6 +9,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"consonance/api/v1alpha1"
 	"consonance/internal/agentapi"
 	"consonance/internal/agentclient"
 	"consonance/internal/supervisorapi"
@@ -48,9 +49,9 @@ func TestRetryLater(t *testing.T) {
 
 func TestPermanentReason(t *testing.T) {
 	cases := map[error]string{
-		agentErr(501, agentapi.CodeReflinkUnsupported, ""):  ReasonReflinkUnsupported,
-		agentErr(507, agentapi.CodeInsufficientStorage, ""): ReasonInsufficientStorage,
-		agentErr(400, agentapi.CodeInvalid, ""):             ReasonInvalid,
+		agentErr(501, agentapi.CodeReflinkUnsupported, ""):  v1alpha1.ReasonReflinkUnsupported,
+		agentErr(507, agentapi.CodeInsufficientStorage, ""): v1alpha1.ReasonInsufficientStorage,
+		agentErr(400, agentapi.CodeInvalid, ""):             v1alpha1.ReasonInvalid,
 		agentErr(409, agentapi.CodeBusy, ""):                "",
 		agentErr(500, agentapi.CodeInternal, ""):            "",
 		errors.New("dial tcp: connection refused"):          "",

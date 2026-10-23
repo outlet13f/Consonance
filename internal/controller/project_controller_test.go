@@ -159,10 +159,10 @@ func TestProjectFailsWithoutReflink(t *testing.T) {
 	})
 	p := getProject(t, ns)
 	c := meta.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionReflinkSupported)
-	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != ReasonReflinkUnsupported || !strings.Contains(c.Message, "not supported") {
+	if c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonReflinkUnsupported || !strings.Contains(c.Message, "not supported") {
 		t.Fatalf("ReflinkSupported %+v", c)
 	}
-	if got := cond(p.Status.Conditions, v1alpha1.ConditionReady); got != "False/"+ReasonReflinkUnsupported {
+	if got := cond(p.Status.Conditions, v1alpha1.ConditionReady); got != "False/"+v1alpha1.ReasonReflinkUnsupported {
 		t.Errorf("Ready %s", got)
 	}
 	// A failed project is not probed again. (A reconcile that read the Project before its
