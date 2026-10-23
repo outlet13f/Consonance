@@ -129,6 +129,7 @@ VM·이미지:
 - 매니페스트를 내기 전에 ClusterRole에서 쓰지 않는 권한을 줄인다. 대상은 Secret·PVC의 update·patch·delete, 파드의 update·patch, Service의 patch, 쿼터·네트워크 정책의 patch·delete, Branch의 patch·delete, status의 get·patch, 리스의 list·watch·patch·delete다. 리스와 이벤트 권한은 `consonance-system`의 Role로 옮긴다. 줄인 뒤 `cmd/operator`의 테스트를 돌린다. 그 테스트는 오퍼레이터 역할로 각 경로를 확인한다. 클러스터 밖에서 리더 선출을 켜려면 `--leader-election-namespace` 플래그를 추가해야 한다.
 - 브랜치 파드가 실행 중일 때 에이전트 파드를 바꾸는 경우(이미지 변경)를 네트워크 RWO 스토리지 클래스에서 E2E로 확인한다. 오퍼레이터는 새 에이전트 파드를 실행 중인 브랜치 파드의 노드에 둔다(필수 nodeAffinity).
 - 노드 장애를 넣어 조정 지연을 잰다. 응답 없는 감독 프로세스는 2초 제한으로 묻고, 2초에서 30초까지 늘려 가며 다시 묻는다.
+- 다국어(스펙 16장): 브랜치 이미지에서 ICU 정렬을 E2E로 확인한다(`pg_collation`의 ICU 정렬, `COLLATE "ko-x-icu"`·`"und-x-icu"`로 한글·악센트 정렬). 공식 `postgres:17`은 `--with-icu`로 빌드돼 있다. pg_bigm·PGroonga를 이미지에 넣을 수 있는지(Debian 패키지·빌드)도 본다. 넣을지는 스펙 16장에서 정한다.
 
 ### 미뤄 둔 개선 사항
 
