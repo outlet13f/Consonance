@@ -40,7 +40,7 @@ const (
 // Labels and annotations.
 const (
 	LabelManagedBy     = "app.kubernetes.io/managed-by"
-	ManagedBy          = "consonance-operator" // on every object the operator makes
+	ManagedBy          = "consonance-operator" // on the Kubernetes objects the operator makes; not on Branches, which the API server makes too
 	LabelComponent     = "app.kubernetes.io/component"
 	ComponentAgent     = "volume-agent"
 	ComponentBranch    = "branch"
@@ -70,7 +70,8 @@ func ProjectID(namespace string) (string, bool) {
 	return id, true
 }
 
-// managedLabels are the labels of every object the operator makes.
+// managedLabels are the labels of the Kubernetes objects the operator makes. Branches, which the
+// API server makes too, do not carry them.
 func managedLabels(component string) map[string]string {
 	return map[string]string{LabelManagedBy: ManagedBy, LabelComponent: component}
 }

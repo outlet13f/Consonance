@@ -334,10 +334,15 @@ func (r *BranchReconciler) freeBackupName(ctx context.Context, b *v1alpha1.Branc
 }
 
 // ensureBackupBranch makes the stopped branch that holds a rollback's replaced data. Its data is
-// there already, so its own reconcile finds it instead of copying.
+// there already, so its own reconcile finds it instead of copying. It carries the finalizer from
+// the start: deleted before its first reconcile, it would leave the moved data with no Branch.
 func (r *BranchReconciler) ensureBackupBranch(ctx context.Context, b *v1alpha1.Branch, name string) error {
 	backup := &v1alpha1.Branch{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: b.Namespace, Labels: map[string]string{LabelBackupOf: b.Name}},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: b.Namespace,
+			Labels:     map[string]string{LabelBackupOf: b.Name},
+			Finalizers: []string{BranchFinalizer},
+		},
 		Spec: v1alpha1.BranchSpec{
 			Parent:  b.Name,
 			Source:  v1alpha1.BranchSource{Type: v1alpha1.SourceParentLatest},

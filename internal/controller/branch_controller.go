@@ -184,6 +184,9 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	b.Status.ObservedGeneration = b.Generation
 	if !equality.Semantic.DeepEqual(*before, b.Status) {
 		if uerr := r.Status().Update(ctx, &b); uerr != nil {
+			if apierrors.IsConflict(uerr) {
+				return res, err // a newer version exists, and its update event brings the branch back
+			}
 			return ctrl.Result{}, errors.Join(err, uerr)
 		}
 	}

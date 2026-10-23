@@ -166,7 +166,8 @@ func TestBranchFromAMissingRestorePointFails(t *testing.T) {
 	}
 	n := countCalls(fp, "CreateBranchData(lost") // a permanent failure is not retried
 	time.Sleep(time.Second)
-	if m := countCalls(fp, "CreateBranchData(lost"); m != n {
+	// A reconcile on a stale cache may make one more call; a retry loop makes many.
+	if m := countCalls(fp, "CreateBranchData(lost"); m > n+1 {
 		t.Errorf("%d copies, then %d", n, m)
 	}
 	var pod corev1.Pod

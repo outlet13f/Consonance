@@ -93,6 +93,9 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	summarize(&p)
 	if !equality.Semantic.DeepEqual(*before, p.Status) {
 		if uerr := r.Status().Update(ctx, &p); uerr != nil {
+			if apierrors.IsConflict(uerr) {
+				return res, err // a newer version exists, and its update event brings the project back
+			}
 			return ctrl.Result{}, errors.Join(err, uerr)
 		}
 	}
