@@ -98,9 +98,10 @@ func New(cfg Config) http.Handler {
 
 // endpoints is every route with its handler; a task that adds endpoints adds them here.
 func (s *server) endpoints() []endpoint {
-	return []endpoint{
+	eps := []endpoint{
 		{route{http.MethodGet, "/healthz", "healthz"}, s.healthz},
 	}
+	return append(eps, s.projectEndpoints()...)
 }
 
 // routes lists the endpoints without their handlers.

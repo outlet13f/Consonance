@@ -54,24 +54,29 @@ func TestAuthRefusesEverythingWithoutAConfiguredKey(t *testing.T) {
 
 func TestUnknownRouteIsProblem(t *testing.T) {
 	cfg, _, _ := testConfig()
-	srv := newServerWithRoutes(t, cfg, endpoint{route{http.MethodGet, "/v1/projects", "test.list"}, func(w http.ResponseWriter, r *http.Request) error {
+	srv := newServerWithRoutes(t, cfg, endpoint{route{http.MethodGet, "/v1/test-only", "test.list"}, func(w http.ResponseWriter, r *http.Request) error {
 		writeJSON(w, http.StatusOK, map[string]string{})
 		return nil
 	}})
 	resp, body := call(t, srv, http.MethodGet, "/v1/nope", nil)
 	wantProblem(t, resp, body, http.StatusNotFound, typeNotFound)
 
-	resp, body = call(t, srv, http.MethodPut, "/v1/projects", nil)
+	resp, body = call(t, srv, http.MethodPut, "/v1/test-only", nil)
 	wantProblem(t, resp, body, http.StatusMethodNotAllowed, typeValidation)
 	if got := resp.Header.Get("Allow"); got != "GET, HEAD" {
 		t.Errorf("Allow = %q, want GET, HEAD", got)
 	}
 
+	// The same against the real routes.
+	real, _, _ := newTestServer(t)
+	resp, body = call(t, real, http.MethodPut, "/v1/projects", nil)
+	wantProblem(t, resp, body, http.StatusMethodNotAllowed, typeValidation)
+
 	// The same for a route that needs no key.
 	resp, body = call(t, srv, http.MethodPost, "/healthz", nil)
 	wantProblem(t, resp, body, http.StatusMethodNotAllowed, typeValidation)
 	// Without the key the answer is 401 whether or not the route exists.
-	resp, body = callWith(t, srv, http.MethodPut, "/v1/projects", nil, "")
+	resp, body = callWith(t, srv, http.MethodPut, "/v1/test-only", nil, "")
 	wantProblem(t, resp, body, http.StatusUnauthorized, typeUnauthorized)
 }
 
