@@ -78,6 +78,7 @@ API 그룹은 가칭 `consonance.io/v1alpha1`이다. 제품명이 확정되면 �
 - 프로젝트: `cns-<projectId>`. `projectId`는 소문자 영숫자 12자 무작위 값이다.
 - 프로젝트 네임스페이스에는 Project 1개(이름은 항상 `project`)와 Branch 여러 개가 있다.
 - 프로젝트 삭제 = 네임스페이스 삭제.
+- API 서버가 만드는 프로젝트 네임스페이스에는 라벨 `app.kubernetes.io/managed-by: consonance-apiserver`와 `pod-security.kubernetes.io/enforce: restricted`를 붙인다.
 
 ### 4.2 Project
 
@@ -191,7 +192,7 @@ status:
 
 ## 5. REST API
 
-- 기본 경로 `/v1`, JSON, 인증 헤더 `Authorization: Bearer <관리자 키>`(Secret `consonance-admin-key`).
+- 기본 경로 `/v1`, JSON, 인증 헤더 `Authorization: Bearer <관리자 키>`(Secret `consonance-admin-key`의 `key`, `--admin-key-file`).
 - 오류는 RFC 9457 `application/problem+json`.
 - OpenAPI 3.1 문서를 함께 제공한다(`/v1/openapi.json`).
 
@@ -225,6 +226,15 @@ status:
 | 429 | `rate-limited` | 브랜치 최대 개수, 최소 복사 간격 위반 (`Retry-After` 포함) |
 | 507 | `insufficient-storage` | 볼륨 사용률 90% 초과 |
 | 500 | `internal` | 그 밖의 실패 (`detail`에 원인) |
+
+- 브랜치 개수: 사용자가 만든 브랜치(main 포함)가 `maxBranches`개면 새 브랜치는 429다. 백업 브랜치는 따로 세어 `maxBranches`개까지 두며, 그 수가 찬 상태의 롤백은 429로 막는다. 파드 수는 쿼터 `2 × maxBranches + 1`을 넘지 않는다.
+- 롤백·리셋 결과: `lastRestore.phase`가 `Done`이면 200, `Failed`면 500 `internal`이고 `detail`에 `lastRestore.message`를 적는다.
+- 복구 지점 삭제: 에이전트가 404를 주면 404다. 삭제를 멱등으로 만들지 않는다.
+- 브랜치 이름은 DNS-1123 label, 최대 40자다. 백업 브랜치 이름 형식(`<이름>-before-<14자리 숫자>`)은 사용자가 쓸 수 없고 400이다.
+- 복구 지점 라벨은 256바이트까지다(한글 약 85자). 넘으면 400이다.
+- 롤백·리셋의 `X-Request-Id`는 멱등 키다. 브랜치마다 가장 최근 요청 하나만 기억하고, 같은 ID로 다시 보내면 앞 결과(실패한 500도)를 돌려준다. 같은 ID로 다른 요청(다른 복구 지점, 롤백 대신 리셋)을 보내면 409다. 실패 뒤 다시 하려면 새 ID를 쓴다.
+- 프로젝트 삭제는 API 서버가 만든 네임스페이스(라벨 `app.kubernetes.io/managed-by: consonance-apiserver`)만 지운다. 그 밖의 `cns-` 네임스페이스는 404다.
+- 인증 없이 열리는 경로는 `GET /healthz`와 `GET /v1/openapi.json`뿐이다.
 
 ## 6. 볼륨 레이아웃과 세대
 
@@ -324,6 +334,9 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - Go 표준 `net/http` 라우팅. 상태가 없고 여러 개 띄울 수 있다.
 - 쿠버네티스 리소스는 controller-runtime 클라이언트(캐시 사용)로 쓰고 읽는다.
 - 동기 응답이 필요한 요청은 해당 Branch status를 watch로 기다리고, 제한 시간(5장 표)을 넘으면 202와 현재 상태를 돌려준다.
+- 동기 대기는 캐시를 100ms마다 읽어 확인한다. 캐시는 watch로 채워지므로 API 서버가 따로 부하를 받지 않는다.
+- Secret과 Namespace는 캐시하지 않고 클러스터에서 매번 읽는다.
+- 종료할 때는 진행 중인 요청을 35초까지 기다린다.
 
 ### 7.5 파드 명세 공통
 

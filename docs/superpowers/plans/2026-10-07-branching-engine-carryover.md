@@ -49,14 +49,6 @@ pgctl 부트스트랩:
 
 ## 계획 2(볼륨 에이전트)에서
 
-### 계획 4(REST API 서버)가 반영할 것
-
-- main 리셋은 공개 API가 막는다(스펙 5장 409 `conflict`). 에이전트는 main 삭제만 거부하고, main의 `ParentLatest` 세대 생성(리셋)은 받아들인다.
-- `agentclient.Client`는 `agent.Ops`를 구현하지 않는다(클라이언트의 메서드는 모두 `ctx`를 받는다). 쓰는 메서드만 모은 인터페이스를 쓰는 쪽에 둔다(오퍼레이터는 `internal/controller`의 `AgentAPI`). 클라이언트는 리다이렉트를 따라가지 않아 3xx도 `APIError`다. `Code`가 빈 `APIError`는 `{error, code}` 본문이 아닌 응답이다. 프록시 같은 중간 장치가 냈거나, 에이전트의 라우터가 직접 낸 307(Go 1.27부터. 경로에 `.`·`..` 조각이 있거나, 빈 이름 때문에 `//`가 생긴 경우)·404(없는 경로)·405(맞지 않는 메서드)다.
-- `DeleteRestorePoint`를 다시 보내면 404다(지운 뒤에는 없는 복구 지점이다). 공개 API에서 삭제를 재시도할 때 404를 어떻게 다룰지 정한다.
-- 브랜치 데이터가 생기기 전에는 `ListRestorePoints`가 404다.
-- 복구 지점 라벨은 256바이트까지다(한글 약 85자). 스펙에는 한도가 없으므로 API 문서에 적는다.
-
 ### 미뤄 둔 개선 사항
 
 볼륨 레이아웃·기동 시 정리:
@@ -100,21 +92,6 @@ VM·이미지:
 - 스모크 테스트에 CPU 한도(100m)가 없다. curl이 시간 초과로 끝나면 `docker logs`·OOMKilled를 보이기 전에 스크립트가 끝난다. colima에 buildx가 없어 빌드할 때마다 약 1.4GB의 이름 없는 빌드 단계 이미지가 남는다.
 
 ## 계획 3(CRD·오퍼레이터)에서
-
-### 계획 4(REST API 서버)가 반영할 것
-
-- 프로젝트 생성은 네임스페이스 `cns-<projectId>`와 그 안의 Project `project`를 만드는 것이다. spec에서 비운 값은 CRD 기본값(스펙 14장)이 채운다. 진행은 `status.phase`와 조건(`VolumeReady`, `AgentReady`, `ReflinkSupported`, `MainReady`, 이를 요약한 `Ready`)으로 읽는다.
-- 브랜치 생성 전 검사(부모 실행 중, `maxBranches`, 이름 형식)는 API가 한다. 오퍼레이터는 브랜치 수를 세지 않고, 부모가 실행 중이 아니면 데이터 만들기를 기다린다(`DataReady=False`, 이유 `ParentNotRunning`). 롤백이 만든 백업 브랜치(라벨 `consonance.io/backup-of`)도 Branch다. 개수에 넣을지 정한다.
-- 브랜치의 영구 실패는 phase `Failed`와 조건 `DataReady=False`의 이유(`ReflinkUnsupported`·`InsufficientStorage`·`SourceNotFound`·`Invalid`)로 드러난다. 기동 실패는 phase `Failed`, 조건 `Ready=False`(이유 `StartFailed`)이고 오퍼레이터가 계속 다시 시도한다.
-- 롤백·리셋은 `spec.restore`에 새 `requestId`와 출처를 쓰고, `status.lastRestore.requestId`가 그 값이 되고 `phase`가 `Done`이나 `Failed`가 될 때까지 기다린다. 응답의 `backupBranch`는 `lastRestore.backupBranch`, 리셋이 만든 복구 지점은 `lastRestore.restorePointId`다. 진행 중인 요청이 끝나기 전에 쓴 새 `requestId`는 끝난 뒤에 수행된다. 정지된 브랜치도 새 데이터가 기동하는지 확인하려고 잠시 기동했다가 다시 정지한다.
-- `spec.restore`는 요청 하나만 담는다. 진행 중인 요청이 끝나기 전에 두 번 쓰면 그사이에 쓴 요청은 수행되지 않는다. API는 진행 중인 요청이 있으면 새 요청을 409로 막는다. main 리셋도 409로 막는다(오퍼레이터는 에이전트를 부르기 전에 Failed로 끝낸다).
-- 접속 정보는 Secret `db-credentials`(`username`·`password`·`database`)와 Branch `status.endpoint`에서 온다.
-- main Branch 객체를 지우면 오퍼레이터가 데이터는 둔 채 다시 만든다. main 삭제는 API가 409로 막는다.
-- 롤백이 만든 백업 브랜치는 정지 상태로도 파드를 두므로 파드 쿼터(`2 × maxBranches + 1`)와 노드 자원을 쓴다. 롤백을 거듭하면 쿼터나 노드가 차서 새 브랜치의 파드가 만들어지지 않는다(조건 `Ready=False`, 이유 `PodCreateFailed`·`Unschedulable`). 백업 브랜치를 개수에 넣거나 정리 정책을 둔다.
-- 리셋도 부모가 실행 중이어야 한다(아니면 409). 오퍼레이터는 부모가 실행될 때까지 기다리고, 그동안 리셋을 취소할 방법이 없다.
-- 백업 브랜치 이름 형식(`<이름>-before-<14자리 숫자>`)은 사용자가 쓰지 못하게 막는다. 롤백이 이름을 고른 뒤 같은 이름의 브랜치가 생기면 옮긴 데이터를 그 브랜치가 가져간다.
-- 브랜치 조건 `Ready`의 이유는 참이면 `Running`·`Stopped`, 거짓이면 `SupervisorUnavailable`·`StartFailed`·`Unschedulable`·`PodCreateFailed`다. 프로젝트 조건 `AgentReady`의 거짓 이유는 `AgentUnavailable`·`Unschedulable`·`AgentPodFailed`다. 영구 실패 이유 넷 말고는 내보낸 상수가 아니므로, API가 맞춰 보려면 `api/v1alpha1`로 옮긴다. Project phase `Pending`(스펙 4.2)은 쓰이지 않는다.
-- `storage.storageClassName`에는 CRD 기본값이 없어 비우면 클러스터 기본 클래스를 쓴다. k3s 기본(local-path)은 reflink가 없어 프로젝트가 영구 실패한다. API 기본값이나 오퍼레이터 플래그 중 하나로 정한다(계획 5의 `consonance-xfs`와 함께).
 
 ### 계획 5(배포·E2E·성능)가 반영할 것
 
@@ -161,3 +138,18 @@ VM·이미지:
 - `TestDeletingABranchWaitsForItsPodToGo`는 Fatal로 끝나면 파드의 테스트 파이널라이저를 남긴다. envtest의 ClusterIP 범위 때문에 internal/controller를 `-count` 3 넘게 돌릴 수 없다.
 - 오퍼레이터 테스트: `http.Get`에 시간 제한이 없고, 기한 20초가 preflight 제한 10초와 가깝고, 바이너리를 두 번 빌드하고, JSON 확인이 부분 문자열이고, 메트릭을 끈 것을 확인하지 않는다.
 - 가짜 에이전트: 멈춘 PostgreSQL의 Bootstrap이 409(실제는 500), 데이터 없는 Status가 `data-0`(실제는 ""), PostgreSQL 상태를 파드 UID에 묶지 않고, 입력을 검사하지 않고, 종료 중인 파드를 응답 없음으로 보고, 파드 Get 오류를 파드 없음으로 본다. `loseAnswers`는 DetachGeneration만 따른다.
+
+## 계획 4(REST API 서버)에서
+
+- 실행이 끝날 때 컨트롤러가 리뷰에서 미뤄 둔 지적을 이 절 아래 `### 미뤄 둔 개선 사항`으로 더한다.
+
+### 계획 5(배포·E2E·성능)가 반영할 것
+
+- API 서버 Deployment는 `consonance-system`에서 파드 라벨 `app.kubernetes.io/name: consonance-apiserver`, ClusterRole `consonance-apiserver`(`config/rbac/apiserver/role.yaml`), Secret `consonance-admin-key`(키 `key`)를 파일로 마운트해 `--admin-key-file`로 준다. `consonance/apiserver` 이미지는 아직 없다(스펙 7.6).
+- 외부 노출(인그레스·TLS)은 계획 5에서 정한다. API 서버는 평문 HTTP로 듣는다.
+- E2E 시나리오(스펙 12장)는 이 API로 돈다.
+- 스펙 11장의 메트릭은 API 서버에도 없다(오퍼레이터·에이전트와 같이 계획 5).
+- API 서버 파드의 `terminationGracePeriodSeconds`는 40초 이상으로 둔다. 종료 때 진행 중인 요청(롤백 대기 최대 30초)을 35초까지 기다린다.
+- OpenAPI 문서(`internal/httpapi/openapi.json`)를 OpenAPI 3.1 검증기로 한 번 돌린다. 지금은 테스트로 경로·스키마만 맞춘다.
+- 리셋 요청을 받은 뒤 부모가 정지하면 오퍼레이터는 부모가 실행될 때까지 기다리고, 그동안 리셋을 취소할 방법이 없다(스펙 5장에 취소가 없다). API는 요청 시점의 부모 상태만 검사한다. 이 경우를 E2E에서 확인하고, 취소를 둘지 스펙에서 정한다.
+- 스펙 4.2의 Project phase `Pending`은 쓰는 코드가 없다(API는 phase가 빈 프로젝트를 `Provisioning`으로 보인다). 쓸지 목록에서 뺄지 스펙에서 정한다.
