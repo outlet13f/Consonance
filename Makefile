@@ -8,10 +8,11 @@ test: ## host tests (PostgreSQL and XFS tests skip)
 	go vet ./...
 	go test ./...
 
-generate: ## deepcopy code, CRDs and the operator's ClusterRole (controller-gen)
+generate: ## deepcopy code, CRDs and the ClusterRoles of the operator and the API server (controller-gen)
 	$(CONTROLLER_GEN) object paths=./api/...
 	$(CONTROLLER_GEN) crd paths=./api/... output:crd:artifacts:config=config/crd/bases
 	$(CONTROLLER_GEN) rbac:roleName=consonance-operator paths=./internal/controller/... output:rbac:artifacts:config=config/rbac
+	$(CONTROLLER_GEN) rbac:roleName=consonance-apiserver paths=./internal/httpapi/... output:rbac:artifacts:config=config/rbac/apiserver
 
 envtest: ## download the envtest API server and etcd into bin/envtest
 	$(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(CURDIR)/bin/envtest
