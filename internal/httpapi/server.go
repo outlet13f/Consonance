@@ -105,7 +105,8 @@ func (s *server) endpoints() []endpoint {
 	eps = append(eps, s.branchEndpoints()...)
 	eps = append(eps, s.connectionEndpoints()...)
 	eps = append(eps, s.stateEndpoints()...)
-	return append(eps, s.restorePointEndpoints()...)
+	eps = append(eps, s.restorePointEndpoints()...)
+	return append(eps, s.restoreEndpoints()...)
 }
 
 // routes lists the endpoints without their handlers.

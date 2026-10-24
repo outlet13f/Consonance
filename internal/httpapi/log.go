@@ -14,6 +14,7 @@ import (
 // handler added with logAttrs.
 type reqState struct {
 	mu    sync.Mutex
+	id    string // the request id, fixed when the request starts
 	op    string
 	attrs []any
 }
@@ -23,6 +24,15 @@ type reqStateKey struct{}
 func stateOf(ctx context.Context) *reqState {
 	st, _ := ctx.Value(reqStateKey{}).(*reqState)
 	return st
+}
+
+// requestIDOf is the id of the request: the X-Request-Id it came with, or the one made for it. A
+// handler that must tell a repeated request from a new one uses it. Outside a request it is "".
+func requestIDOf(ctx context.Context) string {
+	if st := stateOf(ctx); st != nil {
+		return st.id
+	}
+	return ""
 }
 
 // logAttrs adds fields (key, value, ...) to the request's log line, for example
@@ -99,7 +109,7 @@ func (s *server) logged(next http.Handler) http.Handler {
 			id = newRequestID()
 		}
 		w.Header().Set("X-Request-Id", id)
-		st := &reqState{op: "unknown"}
+		st := &reqState{id: id, op: "unknown"}
 		sw := &statusWriter{ResponseWriter: w}
 		next.ServeHTTP(sw, r.WithContext(context.WithValue(r.Context(), reqStateKey{}, st)))
 

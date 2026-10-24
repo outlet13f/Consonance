@@ -84,19 +84,8 @@ func (s *server) changeState(w http.ResponseWriter, r *http.Request, want v1alph
 	wantPhase := phaseOfState(want)
 	var failure error
 	reached, err := waitFor(ctx, s.waits.State, func(ctx context.Context) (bool, error) {
-		switch err := s.client.Get(ctx, client.ObjectKeyFromObject(b), b); {
-		case apierrors.IsNotFound(err):
-			// Not in the cache yet, or deleted: only the cluster knows which.
-			var latest v1alpha1.Branch
-			switch err := s.reader.Get(ctx, client.ObjectKeyFromObject(b), &latest); {
-			case apierrors.IsNotFound(err):
-				return false, notFound("branch %s was deleted", name)
-			case err != nil:
-				return false, fromKube(err)
-			}
-			return false, nil
-		case err != nil:
-			return false, fromKube(err)
+		if visible, err := s.refresh(ctx, b); err != nil || !visible {
+			return false, err
 		}
 		if b.Status.ObservedGeneration < generation {
 			return false, nil
@@ -121,6 +110,26 @@ func (s *server) changeState(w http.ResponseWriter, r *http.Request, want v1alph
 		writeJSON(w, http.StatusAccepted, branchViewOf(b))
 	}
 	return nil
+}
+
+// refresh reads b again from the cache, for a request that waits for the operator. A Branch the
+// cache does not have is not necessarily gone: visible is false while the cluster still has it,
+// and only when the cluster has not either is it a 404 (the cache may be behind).
+func (s *server) refresh(ctx context.Context, b *v1alpha1.Branch) (visible bool, err error) {
+	switch err := s.client.Get(ctx, client.ObjectKeyFromObject(b), b); {
+	case apierrors.IsNotFound(err):
+		var latest v1alpha1.Branch
+		switch err := s.reader.Get(ctx, client.ObjectKeyFromObject(b), &latest); {
+		case apierrors.IsNotFound(err):
+			return false, notFound("branch %s was deleted", b.Name)
+		case err != nil:
+			return false, fromKube(err)
+		}
+		return false, nil
+	case err != nil:
+		return false, fromKube(err)
+	}
+	return true, nil
 }
 
 // setState writes spec.state of the branch, unless it has the state already, and returns the
