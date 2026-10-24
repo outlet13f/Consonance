@@ -100,6 +100,7 @@ func New(cfg Config) http.Handler {
 func (s *server) endpoints() []endpoint {
 	eps := []endpoint{
 		{route{http.MethodGet, "/healthz", "healthz"}, s.healthz},
+		{route{http.MethodGet, openAPIPath, "openapi"}, s.openAPI},
 	}
 	eps = append(eps, s.projectEndpoints()...)
 	eps = append(eps, s.branchEndpoints()...)
@@ -122,7 +123,8 @@ func (s *server) routes() []route {
 // methods are the ones a 405 looks for, in the order of the Allow header.
 var methods = []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 
-// handler builds the router: the log and request id around the key check around a ServeMux.
+// handler builds the router: the log and request id around the key check (everything but the
+// public set of isPublic) around a ServeMux.
 // The mux answers neither 404 nor 405 with a problem, so a catch-all route does it.
 func (s *server) handler(eps []endpoint) http.Handler {
 	mux := http.NewServeMux()
@@ -148,7 +150,7 @@ func (s *server) handler(eps []endpoint) http.Handler {
 		writeProblem(w, r, &apiError{Status: http.StatusMethodNotAllowed, Type: typeValidation, Detail: r.Method + " is not allowed here; use " + strings.Join(allow, ", ")})
 	})
 	return s.logged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if needsAuth(r.URL.Path) && !s.authorized(r) {
+		if !isPublic(r.Method, r.URL.Path) && !s.authorized(r) {
 			setOp(r.Context(), "unauthorized")
 			unauthorized(w, r)
 			return

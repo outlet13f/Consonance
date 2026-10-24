@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -50,6 +51,54 @@ func TestAuthRefusesEverythingWithoutAConfiguredKey(t *testing.T) {
 	srv, _, _ := newTestServerWith(t, func(c *Config) { c.AdminKey = "" })
 	resp, body := callWith(t, srv, http.MethodGet, "/v1/nope", nil, "Bearer ")
 	wantProblem(t, resp, body, http.StatusUnauthorized, typeUnauthorized)
+}
+
+// TestOnlyHealthzAndOpenAPIArePublic: the public set is explicit, so a route added later, or a
+// path outside /v1, is behind the key unless it is named in the set.
+func TestOnlyHealthzAndOpenAPIArePublic(t *testing.T) {
+	var reached atomic.Bool
+	cfg, _, _ := testConfig()
+	srv := newServerWithRoutes(t, cfg,
+		endpoint{route{http.MethodGet, "/internal/state", "test.internal"}, func(w http.ResponseWriter, r *http.Request) error {
+			reached.Store(true)
+			writeJSON(w, http.StatusOK, map[string]string{})
+			return nil
+		}},
+		endpoint{route{http.MethodPost, "/healthz/deep", "test.deep"}, func(w http.ResponseWriter, r *http.Request) error {
+			reached.Store(true)
+			return nil
+		}})
+
+	// Without a key: 401 for everything but the two public routes, and the handler never runs.
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/internal/state"},
+		{http.MethodPost, "/healthz/deep"},
+		{http.MethodGet, "/metrics"}, // outside /v1 and not a route
+		{http.MethodGet, "/"},
+		{http.MethodPost, "/healthz"}, // public for GET only
+		{http.MethodPost, "/v1/openapi.json"},
+		{http.MethodGet, "/v1/projects"},
+	} {
+		resp, body := callWith(t, srv, c.method, c.path, nil, "")
+		wantProblem(t, resp, body, http.StatusUnauthorized, typeUnauthorized)
+		if reached.Load() {
+			t.Fatalf("%s %s ran its handler without a key", c.method, c.path)
+		}
+	}
+
+	// With the key the routes are reached, and a path outside /v1 that is not a route is a 404.
+	if resp, body := call(t, srv, http.MethodGet, "/internal/state", nil); resp.StatusCode != http.StatusOK || !reached.Load() {
+		t.Errorf("GET /internal/state with the key = %d %s, reached %v", resp.StatusCode, body, reached.Load())
+	}
+	resp, body := call(t, srv, http.MethodGet, "/metrics", nil)
+	wantProblem(t, resp, body, http.StatusNotFound, typeNotFound)
+
+	// The two public routes need no key.
+	for _, path := range []string{"/healthz", "/v1/openapi.json"} {
+		if resp, body := callWith(t, srv, http.MethodGet, path, nil, ""); resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s without a key = %d %s", path, resp.StatusCode, body)
+		}
+	}
 }
 
 func TestUnknownRouteIsProblem(t *testing.T) {

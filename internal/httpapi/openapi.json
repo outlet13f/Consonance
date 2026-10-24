@@ -1,0 +1,1470 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Consonance API",
+    "version": "v1alpha1",
+    "description": "The REST API of Consonance: projects, their branches and restore points. Every request except GET /healthz and GET /v1/openapi.json needs the admin key as Authorization: Bearer <key>. Errors are RFC 9457 application/problem+json with the seven types of the Problem schema. Every response carries X-Request-Id: the request's own header (1 to 64 letters, digits, '-' and '_') or a generated one; it is the key of the log line."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "adminKey": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Projects"
+    },
+    {
+      "name": "Branches"
+    },
+    {
+      "name": "Restore points"
+    }
+  ],
+  "paths": {
+    "/v1/projects": {
+      "post": {
+        "operationId": "project.create",
+        "summary": "Create a project",
+        "description": "Creates the project (its namespace and Project object) and answers 202 at once with the project in phase Provisioning; the operator makes the volume, the agent and the main branch afterwards. Poll GET /v1/projects/{projectId} until phase is Ready. The project id is a random 12-character lowercase alphanumeric string chosen by the server. Fields left out (storageSize, compute) take the project defaults. A 400 is returned for a bad displayName (1 to 100 characters), a storageSize below 1Gi or that is not a quantity, or a compute without both cpu and memory above zero.",
+        "tags": [
+          "Projects"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "The project to create.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; the project is Provisioning.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      },
+      "get": {
+        "operationId": "project.list",
+        "summary": "List projects",
+        "description": "Every project of the cluster, ordered by id. There is no paging.",
+        "tags": [
+          "Projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "The projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        }
+      ],
+      "get": {
+        "operationId": "project.get",
+        "summary": "Get a project",
+        "description": "The project with its phase. A failed or not yet ready project carries reason and message (why Ready is false).",
+        "tags": [
+          "Projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "The project.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "project.delete",
+        "summary": "Delete a project",
+        "description": "Deletes the project's namespace; Kubernetes removes what is in it, volume included, and the answer does not wait for that (202). A project already being deleted answers 202 too. Only projects this API server created can be deleted; any other id is 404.",
+        "tags": [
+          "Projects"
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted; the project is being deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        }
+      ],
+      "post": {
+        "operationId": "branch.create",
+        "summary": "Create a branch",
+        "description": "Copies the parent branch into a new one. Branch names are DNS-1123 labels of at most 40 characters (lowercase letters, digits and '-', starting and ending with a letter or digit). The form <name>-before-<14 digits> belongs to the backup branches a rollback makes and cannot be chosen; 'main' always exists. The parent defaults to main. Without restorePointId the copy is of the parent's running database, so the parent must be Running (409 otherwise); with restorePointId it is of that restore point of the parent, which is checked to exist (404), and the parent need not run. The project must be Ready (409 otherwise) and below its branch limit (429 with Retry-After: 60; main counts, backup branches of rollbacks are counted separately). Waits up to 5 seconds for the data: 201 with the branch when the data is ready, 202 when the wait ends first (poll GET on the branch, or its connection once it has an endpoint). A branch whose data cannot be made is answered by its permanent failure, and the branch stays in phase Failed until it is deleted: 404 when the source is gone, 507 when the volume is too full, 409 when the project cannot copy (reflink unsupported or invalid); a Failed branch without data for any other reason is 500.",
+        "tags": [
+          "Branches"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "The branch to create.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBranchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; the branch's data is ready.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; the data was not ready within 5 seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          },
+          "507": {
+            "$ref": "#/components/responses/InsufficientStorage"
+          }
+        }
+      },
+      "get": {
+        "operationId": "branch.list",
+        "summary": "List branches",
+        "description": "Every branch of the project ordered by name, the backup branches of rollbacks included (backupOf is set on them).",
+        "tags": [
+          "Branches"
+        ],
+        "responses": {
+          "200": {
+            "description": "The branches.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        }
+      ],
+      "get": {
+        "operationId": "branch.get",
+        "summary": "Get a branch",
+        "description": "The branch with its phase, endpoint and last restore.",
+        "tags": [
+          "Branches"
+        ],
+        "responses": {
+          "200": {
+            "description": "The branch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "branch.delete",
+        "summary": "Delete a branch",
+        "description": "Asks for the deletion and answers 202 without waiting for the operator; its restore points go with it. A branch already being deleted answers 202 too. The main branch cannot be deleted (409): delete the project instead.",
+        "tags": [
+          "Branches"
+        ],
+        "responses": {
+          "202": {
+            "description": "Accepted; the branch is being deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BranchDeleteAccepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}/connection": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        }
+      ],
+      "get": {
+        "operationId": "branch.connection",
+        "summary": "Get the connection details of a branch",
+        "description": "Host, port, database, user, password and a postgresql:// URI for the branch. It holds the database password: the response carries Cache-Control: no-store and must not be logged or cached. 409 while the branch has no endpoint yet (it is not Running), 500 if the project's credentials Secret is missing.",
+        "tags": [
+          "Branches"
+        ],
+        "responses": {
+          "200": {
+            "description": "The connection details.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Connection"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "description": "Always no-store.",
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}/stop": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        }
+      ],
+      "post": {
+        "operationId": "branch.stop",
+        "summary": "Stop a branch",
+        "description": "Sets the branch to Stopped and waits up to 10 seconds for it to stop: 200 with the branch, 202 when the wait ends first. A branch that is stopped already is answered at once. Works on a project that is not Ready. 409 while a rollback or reset of the branch is open, or the branch is being deleted.",
+        "tags": [
+          "Branches"
+        ],
+        "responses": {
+          "200": {
+            "description": "The branch is Stopped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; the branch was not stopped within 10 seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}/start": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        }
+      ],
+      "post": {
+        "operationId": "branch.start",
+        "summary": "Start a branch",
+        "description": "Sets the branch to Running and waits up to 10 seconds for it to run: 200 with the branch, 202 when the wait ends first. A branch that runs already is answered at once. The project must be Ready. 409 while a rollback or reset of the branch is open, the branch is being deleted, or the project is not Ready; 500 when the branch fails to start.",
+        "tags": [
+          "Branches"
+        ],
+        "responses": {
+          "200": {
+            "description": "The branch is Running.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; the branch was not running within 10 seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Branch"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}/reset": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        },
+        {
+          "$ref": "#/components/parameters/RequestId"
+        }
+      ],
+      "post": {
+        "operationId": "branch.reset",
+        "summary": "Reset a branch to its parent",
+        "description": "Replaces the branch's data with a copy of its parent's running database. The replaced data is kept as a restore point (restorePointId of the result). The main branch has no parent (409); the parent must be Running (409); 409 too while another rollback or reset of the branch is open or the branch is being deleted. The project must be Ready. Waits up to 30 seconds: 200 with the result when the reset is done, 202 (with requestId) when the wait ends first, 500 when the reset failed (the detail has the operator's message). Idempotency and X-Request-Id. The request's X-Request-Id header (1 to 64 letters, digits, '-' and '_') is the idempotency key of the request; without one the server generates an id and returns it in the X-Request-Id response header. Only the latest request of a branch is remembered. Sending the same id again returns the earlier result, including a Failed one (500): to retry after a failure, send a new id. The requestId in a 202 body is what to resend to follow the request. Reusing an id for a different request (another restore point, or a reset instead of a rollback, or the other way round) gets 409. A resend after a newer restore has finished on that branch runs again.",
+        "tags": [
+          "Branches"
+        ],
+        "responses": {
+          "200": {
+            "description": "The reset is done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; the reset was not done within 30 seconds. Resend with the requestId to follow it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}/rollback": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        },
+        {
+          "$ref": "#/components/parameters/RequestId"
+        }
+      ],
+      "post": {
+        "operationId": "branch.rollback",
+        "summary": "Roll a branch back to a restore point",
+        "description": "Restores the branch to one of its own restore points. The current data is kept as a backup branch (<name>-before-<14 digits>, backupBranch of the result), which needs room: with as many backup branches as the project's branch limit the answer is 429 with Retry-After: 60, and the detail asks to delete an old backup branch. 404 when the restore point is not the branch's; 409 while another rollback or reset of the branch is open or the branch is being deleted. The project must be Ready. Waits up to 30 seconds: 200 with the result when the rollback is done, 202 (with requestId) when the wait ends first, 500 when it failed (the detail has the operator's message). Idempotency and X-Request-Id. The request's X-Request-Id header (1 to 64 letters, digits, '-' and '_') is the idempotency key of the request; without one the server generates an id and returns it in the X-Request-Id response header. Only the latest request of a branch is remembered. Sending the same id again returns the earlier result, including a Failed one (500): to retry after a failure, send a new id. The requestId in a 202 body is what to resend to follow the request. Reusing an id for a different request (another restore point, or a reset instead of a rollback, or the other way round) gets 409. A resend after a newer restore has finished on that branch runs again.",
+        "tags": [
+          "Branches"
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "The restore point to roll back to.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The rollback is done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResult"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Accepted; the rollback was not done within 30 seconds. Resend with the requestId to follow it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}/restore-points": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        }
+      ],
+      "post": {
+        "operationId": "restorepoint.create",
+        "summary": "Create a restore point",
+        "description": "Makes a restore point of the running branch (409 if the branch is not Running). The label is optional text of at most 256 UTF-8 bytes (400 beyond that), which is bytes, not characters. A project may limit how often a branch is copied: 429 with Retry-After; 507 when the volume is too full. The project must be Ready.",
+        "tags": [
+          "Restore points"
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "An optional label.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRestorePointRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestorePoint"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          },
+          "507": {
+            "$ref": "#/components/responses/InsufficientStorage"
+          }
+        }
+      },
+      "get": {
+        "operationId": "restorepoint.list",
+        "summary": "List restore points",
+        "description": "The branch's restore points. The list is empty while the branch has no data yet. The project must be Ready.",
+        "tags": [
+          "Restore points"
+        ],
+        "responses": {
+          "200": {
+            "description": "The restore points.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestorePointList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/v1/projects/{projectId}/branches/{branch}/restore-points/{restorePointId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ProjectId"
+        },
+        {
+          "$ref": "#/components/parameters/Branch"
+        },
+        {
+          "$ref": "#/components/parameters/RestorePointId"
+        }
+      ],
+      "delete": {
+        "operationId": "restorepoint.delete",
+        "summary": "Delete a restore point",
+        "description": "Deletes the restore point. It is not idempotent: a restore point that is not there (or an id of the wrong form) is 404. The project must be Ready.",
+        "tags": [
+          "Restore points"
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "adminKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The admin key of the Secret consonance-admin-key."
+      }
+    },
+    "parameters": {
+      "ProjectId": {
+        "name": "projectId",
+        "in": "path",
+        "required": true,
+        "description": "12 lowercase letters and digits.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9]{12}$"
+        }
+      },
+      "Branch": {
+        "name": "branch",
+        "in": "path",
+        "required": true,
+        "description": "A branch name.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+          "minLength": 1,
+          "maxLength": 40
+        }
+      },
+      "RestorePointId": {
+        "name": "restorePointId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$",
+          "examples": [
+            "rp-20261007T031500Z-ab12"
+          ]
+        }
+      },
+      "RequestId": {
+        "name": "X-Request-Id",
+        "in": "header",
+        "required": false,
+        "description": "The idempotency key of a rollback or reset; see the operation. 1 to 64 letters, digits, '-' and '_'.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{1,64}$"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "validation-error: a bad name, field, body or content type.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "unauthorized: the admin key is missing or wrong.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "headers": {
+          "WWW-Authenticate": {
+            "description": "Always Bearer.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "not-found: no such project, branch or restore point.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "conflict: the request does not fit the state of the project or branch (see the operation).",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "rate-limited: a limit is reached; Retry-After says how many seconds to wait.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        },
+        "headers": {
+          "Retry-After": {
+            "description": "Whole seconds.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      "InsufficientStorage": {
+        "description": "insufficient-storage: the volume has no room.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Internal": {
+        "description": "internal: any other failure; detail has the cause.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "12 lowercase letters and digits.",
+            "pattern": "^[a-z0-9]{12}$"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "description": "Provisioning until the operator has made the volume, the agent and main; Ready when it works.",
+            "enum": [
+              "Pending",
+              "Provisioning",
+              "Ready",
+              "Failed"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the project is not Ready; left out when it is."
+          },
+          "message": {
+            "type": "string",
+            "description": "The operator's explanation of reason."
+          },
+          "storage": {
+            "type": "object",
+            "properties": {
+              "size": {
+                "type": "string",
+                "description": "The requested size, a Kubernetes quantity.",
+                "examples": [
+                  "10Gi"
+                ]
+              },
+              "storageClassName": {
+                "type": "string"
+              },
+              "capacityBytes": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "usedBytes": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "size",
+              "storageClassName",
+              "capacityBytes",
+              "usedBytes"
+            ]
+          },
+          "defaultCompute": {
+            "type": "object",
+            "properties": {
+              "cpu": {
+                "type": "string",
+                "description": "A Kubernetes quantity.",
+                "examples": [
+                  "500m"
+                ]
+              },
+              "memory": {
+                "type": "string",
+                "description": "A Kubernetes quantity.",
+                "examples": [
+                  "1Gi"
+                ]
+              }
+            },
+            "required": [
+              "cpu",
+              "memory"
+            ]
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "maxBranches": {
+                "type": "integer",
+                "description": "Branches a user can have, main included.",
+                "format": "int32"
+              },
+              "minCopyInterval": {
+                "type": "string",
+                "description": "The shortest time between two copies of one branch, as a Go duration.",
+                "examples": [
+                  "1m0s"
+                ]
+              }
+            },
+            "required": [
+              "maxBranches",
+              "minCopyInterval"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "displayName",
+          "phase",
+          "storage",
+          "defaultCompute",
+          "limits",
+          "createdAt"
+        ]
+      },
+      "ProjectList": {
+        "type": "object",
+        "properties": {
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            }
+          }
+        },
+        "required": [
+          "projects"
+        ]
+      },
+      "DeleteAccepted": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "Deleting"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "phase"
+        ]
+      },
+      "BranchDeleteAccepted": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "Deleting"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "phase"
+        ]
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "properties": {
+          "displayName": {
+            "type": "string",
+            "description": "1 to 100 characters.",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "storageSize": {
+            "type": "string",
+            "description": "A Kubernetes quantity of at least 1Gi; the project default when left out.",
+            "examples": [
+              "10Gi"
+            ]
+          },
+          "compute": {
+            "type": "object",
+            "properties": {
+              "cpu": {
+                "type": "string",
+                "description": "Above zero.",
+                "examples": [
+                  "500m"
+                ]
+              },
+              "memory": {
+                "type": "string",
+                "description": "Above zero.",
+                "examples": [
+                  "1Gi"
+                ]
+              }
+            },
+            "required": [
+              "cpu",
+              "memory"
+            ],
+            "description": "The default compute of the project's branches; both fields or none.",
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "displayName"
+        ],
+        "additionalProperties": false
+      },
+      "Branch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "parent": {
+            "type": "string",
+            "description": "The branch this one was copied from; empty for main."
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "Creating",
+              "DataReady",
+              "Starting",
+              "Running",
+              "Stopping",
+              "Stopped",
+              "Restoring",
+              "Failed",
+              "Deleting"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "What the owner asked for.",
+            "enum": [
+              "Running",
+              "Stopped"
+            ]
+          },
+          "protected": {
+            "type": "boolean",
+            "description": "main is protected."
+          },
+          "backupOf": {
+            "type": "string",
+            "description": "Set on the backup branch of a rollback: the branch that was rolled back."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why a Failed branch failed."
+          },
+          "message": {
+            "type": "string",
+            "description": "The operator's explanation of reason."
+          },
+          "endpoint": {
+            "type": "object",
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer",
+                "format": "int32"
+              }
+            },
+            "required": [
+              "host",
+              "port"
+            ],
+            "description": "Where the database listens; there is none until the branch runs."
+          },
+          "createdFrom": {
+            "type": "object",
+            "properties": {
+              "branch": {
+                "type": "string"
+              },
+              "restorePointId": {
+                "type": "string"
+              }
+            },
+            "description": "What the branch was copied from."
+          },
+          "lastRestore": {
+            "type": "object",
+            "properties": {
+              "requestId": {
+                "type": "string"
+              },
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "Preparing",
+                  "Stopping",
+                  "Activating",
+                  "Starting",
+                  "Detaching",
+                  "Done",
+                  "Failed"
+                ]
+              },
+              "backupBranch": {
+                "type": "string"
+              },
+              "restorePointId": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "requestId",
+              "phase"
+            ],
+            "description": "The latest rollback or reset."
+          },
+          "dataReadyAt": {
+            "type": "string",
+            "description": "When the data was ready.",
+            "format": "date-time"
+          },
+          "runningAt": {
+            "type": "string",
+            "description": "When the database first ran.",
+            "format": "date-time"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "name",
+          "parent",
+          "phase",
+          "state",
+          "protected",
+          "createdAt"
+        ]
+      },
+      "BranchList": {
+        "type": "object",
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Branch"
+            }
+          }
+        },
+        "required": [
+          "branches"
+        ]
+      },
+      "CreateBranchRequest": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+            "minLength": 1,
+            "maxLength": 40,
+            "description": "Branch names are DNS-1123 labels of at most 40 characters (lowercase letters, digits and '-', starting and ending with a letter or digit). The form <name>-before-<14 digits> belongs to the backup branches a rollback makes and cannot be chosen; 'main' always exists."
+          },
+          "parent": {
+            "type": "string",
+            "description": "The branch to copy; main when left out.",
+            "default": "main"
+          },
+          "restorePointId": {
+            "type": "string",
+            "pattern": "^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$",
+            "examples": [
+              "rp-20261007T031500Z-ab12"
+            ],
+            "description": "A restore point of the parent to copy from, instead of its running database."
+          },
+          "state": {
+            "type": "string",
+            "description": "Running when left out.",
+            "enum": [
+              "Running",
+              "Stopped"
+            ],
+            "default": "Running"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "Connection": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "database": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
+          "uri": {
+            "type": "string",
+            "description": "postgresql://user:password@host:port/database, escaped."
+          }
+        },
+        "required": [
+          "host",
+          "port",
+          "database",
+          "user",
+          "password",
+          "uri"
+        ]
+      },
+      "RestorePoint": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$",
+            "examples": [
+              "rp-20261007T031500Z-ab12"
+            ]
+          },
+          "branch": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "type": "string",
+            "description": "api for a restore point made by request; reset for the data a reset replaced."
+          },
+          "label": {
+            "type": "string",
+            "description": "At most 256 UTF-8 bytes; empty when none was given."
+          },
+          "backupStartLSN": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "branch",
+          "createdAt",
+          "reason",
+          "label",
+          "backupStartLSN"
+        ]
+      },
+      "RestorePointList": {
+        "type": "object",
+        "properties": {
+          "restorePoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RestorePoint"
+            }
+          }
+        },
+        "required": [
+          "restorePoints"
+        ]
+      },
+      "CreateRestorePointRequest": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "At most 256 UTF-8 bytes (bytes, not characters).",
+            "maxLength": 256
+          }
+        },
+        "additionalProperties": false
+      },
+      "RollbackRequest": {
+        "type": "object",
+        "properties": {
+          "restorePointId": {
+            "type": "string",
+            "pattern": "^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$",
+            "examples": [
+              "rp-20261007T031500Z-ab12"
+            ],
+            "description": "A restore point of the branch itself."
+          }
+        },
+        "required": [
+          "restorePointId"
+        ],
+        "additionalProperties": false
+      },
+      "RestoreResult": {
+        "type": "object",
+        "properties": {
+          "branch": {
+            "$ref": "#/components/schemas/Branch"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "In a 202: the X-Request-Id to resend to follow the request."
+          },
+          "backupBranch": {
+            "type": "string",
+            "description": "In a 200 for a rollback: the branch that keeps the data before it."
+          },
+          "restorePointId": {
+            "type": "string",
+            "description": "In a 200 for a reset: the restore point that keeps the data it replaced."
+          }
+        },
+        "required": [
+          "branch"
+        ]
+      },
+      "Problem": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "What kind of problem it is.",
+            "enum": [
+              "validation-error",
+              "unauthorized",
+              "not-found",
+              "conflict",
+              "rate-limited",
+              "insufficient-storage",
+              "internal"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "description": "The HTTP status text."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "detail": {
+            "type": "string",
+            "description": "What went wrong, for a person."
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail"
+        ],
+        "description": "An RFC 9457 problem."
+      }
+    }
+  }
+}

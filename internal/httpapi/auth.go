@@ -22,8 +22,15 @@ func (s *server) authorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }
 
-// needsAuth is every path under /v1; /healthz is open so probes need no key.
-func needsAuth(path string) bool { return path == "/v1" || strings.HasPrefix(path, "/v1/") }
+// isPublic is the whole set of requests that need no key: the probe and the API document. It is
+// a list and not a prefix rule, so a path that is not named here, under /v1 or outside it, is
+// behind the key, and a route added later is too. HEAD goes with GET, as the mux serves it.
+func isPublic(method, path string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return false
+	}
+	return path == "/healthz" || path == openAPIPath
+}
 
 func unauthorized(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("WWW-Authenticate", "Bearer")
