@@ -31,7 +31,7 @@
       "post": {
         "operationId": "project.create",
         "summary": "Create a project",
-        "description": "Creates the project (its namespace and Project object) and answers 202 at once with the project in phase Provisioning; the operator makes the volume, the agent and the main branch afterwards. Poll GET /v1/projects/{projectId} until phase is Ready. The project id is a random 12-character lowercase alphanumeric string chosen by the server. Fields left out (storageSize, compute) take the project defaults. A 400 is returned for a bad displayName (1 to 100 characters), a storageSize below 1Gi or that is not a quantity, or a compute without both cpu and memory above zero.",
+        "description": "Creates the project (its namespace and Project object) and answers 202 at once with the project in phase Provisioning; the operator makes the volume, the agent and the main branch afterwards. Poll GET /v1/projects/{projectId} until phase is Ready or Failed, and stop on Failed: its reason says why. The project id is a random 12-character lowercase alphanumeric string chosen by the server. Fields left out (storageSize, compute) take the project defaults. A 400 is returned for a bad displayName (1 to 100 characters), a storageSize below 1Gi or that is not a quantity, or a compute without both cpu and memory above zero.",
         "tags": [
           "Projects"
         ],
@@ -169,7 +169,7 @@
       "post": {
         "operationId": "branch.create",
         "summary": "Create a branch",
-        "description": "Copies the parent branch into a new one. Branch names are DNS-1123 labels of at most 40 characters (lowercase letters, digits and '-', starting and ending with a letter or digit). The form <name>-before-<14 digits> belongs to the backup branches a rollback makes and cannot be chosen; 'main' always exists. The parent defaults to main. Without restorePointId the copy is of the parent's running database, so the parent must be Running (409 otherwise); with restorePointId it is of that restore point of the parent, which is checked to exist (404), and the parent need not run. The project must be Ready (409 otherwise) and below its branch limit (429 with Retry-After: 60; main counts, backup branches of rollbacks are counted separately). Waits up to 5 seconds for the data: 201 with the branch when the data is ready, 202 when the wait ends first (poll GET on the branch, or its connection once it has an endpoint). A branch whose data cannot be made is answered by its permanent failure, and the branch stays in phase Failed until it is deleted: 404 when the source is gone, 507 when the volume is too full, 409 when the project cannot copy (reflink unsupported or invalid); a Failed branch without data for any other reason is 500.",
+        "description": "Copies the parent branch into a new one. Branch names are DNS-1123 labels of at most 40 characters (lowercase letters, digits and '-', starting and ending with a letter or digit). The form <name>-before-<14 digits> belongs to the backup branches a rollback makes and cannot be chosen; 'main' always exists. The parent defaults to main. Without restorePointId the copy is of the parent's running database, so the parent must be Running (409 otherwise); with restorePointId it is of that restore point of the parent, which is checked to exist (404), and the parent need not run. The project must be Ready (409 otherwise) and below its branch limit (429 with Retry-After: 60; main counts, backup branches of rollbacks are counted separately). Waits up to 5 seconds for the data: 201 with the branch when the data is ready, 202 when the wait ends first (poll GET on the branch, or its connection once it has an endpoint). A copy held back by the project's minimum copy interval is waited out: the answer is 201 or 202, never a 429 for the interval; only restore-point creation answers 429 for it. A branch whose data cannot be made is answered by its permanent failure, and the branch stays in phase Failed until it is deleted: 404 when the source is gone, 507 when the volume is too full, 409 when the project cannot copy (reflink unsupported or invalid); a Failed branch without data for any other reason is 500.",
         "tags": [
           "Branches"
         ],
@@ -392,7 +392,7 @@
       "post": {
         "operationId": "branch.stop",
         "summary": "Stop a branch",
-        "description": "Sets the branch to Stopped and waits up to 10 seconds for it to stop: 200 with the branch, 202 when the wait ends first. A branch that is stopped already is answered at once. Works on a project that is not Ready. 409 while a rollback or reset of the branch is open, or the branch is being deleted.",
+        "description": "Sets the branch to Stopped and waits up to 10 seconds for it to stop: 200 with the branch, 202 when the wait ends first. A branch that is stopped already is answered at once. Works on a project that is not Ready. 409 while a rollback or reset of the branch is open, or the branch is being deleted, and when the branch's data has failed for good (DataReady false for a permanent reason, or Failed without data): the operator no longer acts on it, so delete it.",
         "tags": [
           "Branches"
         ],
@@ -444,7 +444,7 @@
       "post": {
         "operationId": "branch.start",
         "summary": "Start a branch",
-        "description": "Sets the branch to Running and waits up to 10 seconds for it to run: 200 with the branch, 202 when the wait ends first. A branch that runs already is answered at once. The project must be Ready. 409 while a rollback or reset of the branch is open, the branch is being deleted, or the project is not Ready; 500 when the branch fails to start.",
+        "description": "Sets the branch to Running and waits up to 10 seconds for it to run: 200 with the branch, 202 when the wait ends first. A branch that runs already is answered at once. The project must be Ready. 409 while a rollback or reset of the branch is open, the branch is being deleted, or the project is not Ready, and when the branch's data has failed for good (DataReady false for a permanent reason, or Failed without data): the operator no longer acts on it, so delete it. 500 when the branch fails to start.",
         "tags": [
           "Branches"
         ],
@@ -499,13 +499,13 @@
       "post": {
         "operationId": "branch.reset",
         "summary": "Reset a branch to its parent",
-        "description": "Replaces the branch's data with a copy of its parent's running database. The replaced data is kept as a restore point (restorePointId of the result). The main branch has no parent (409); the parent must be Running (409); 409 too while another rollback or reset of the branch is open or the branch is being deleted. The project must be Ready. Waits up to 30 seconds: 200 with the result when the reset is done, 202 (with requestId) when the wait ends first, 500 when the reset failed (the detail has the operator's message). Idempotency and X-Request-Id. The request's X-Request-Id header (1 to 64 letters, digits, '-' and '_') is the idempotency key of the request; without one the server generates an id and returns it in the X-Request-Id response header. Only the latest request of a branch is remembered. Sending the same id again returns the earlier result, including a Failed one (500): to retry after a failure, send a new id. The requestId in a 202 body is what to resend to follow the request. Reusing an id for a different request (another restore point, or a reset instead of a rollback, or the other way round) gets 409. A resend after a newer restore has finished on that branch runs again.",
+        "description": "Replaces the branch's data with a copy of its parent's running database. The replaced data is kept as a restore point (restorePointId of the result). The main branch has no parent (409); the parent must be Running (409); 409 too while another rollback or reset of the branch is open or the branch is being deleted, and when the branch's data has failed for good (DataReady false for a permanent reason, or Failed without data): the operator no longer acts on it, so delete it. The project must be Ready. Waits up to 30 seconds: 200 with the result when the reset is done and the branch has settled (its phase is no longer Restoring), 202 (with requestId) when the wait ends first, 500 when the reset failed (the detail has the operator's message). Idempotency and X-Request-Id. The request's X-Request-Id header (1 to 64 letters, digits, '-' and '_') is the idempotency key of the request. A missing header, or one that is not 1 to 64 characters of [A-Za-z0-9_-], is replaced by an id the server makes and returns in the X-Request-Id response header, and a replaced id gives no idempotency: sent again without that id, the request is a new one. Only the latest request of a branch is remembered. Sending the same id again returns the earlier result, including a Failed one (500): to retry after a failure, send a new id. The requestId in a 202 body is what to resend to follow the request. Reusing an id for a different request (another restore point, or a reset instead of a rollback, or the other way round) gets 409. A resend after a newer restore has finished on that branch runs again.",
         "tags": [
           "Branches"
         ],
         "responses": {
           "200": {
-            "description": "The reset is done.",
+            "description": "The reset is done; the branch is shown as it settled after it (its phase is no longer Restoring).",
             "content": {
               "application/json": {
                 "schema": {
@@ -554,7 +554,7 @@
       "post": {
         "operationId": "branch.rollback",
         "summary": "Roll a branch back to a restore point",
-        "description": "Restores the branch to one of its own restore points. The current data is kept as a backup branch (<name>-before-<14 digits>, backupBranch of the result), which needs room: with as many backup branches as the project's branch limit the answer is 429 with Retry-After: 60, and the detail asks to delete an old backup branch. 404 when the restore point is not the branch's; 409 while another rollback or reset of the branch is open or the branch is being deleted. The project must be Ready. Waits up to 30 seconds: 200 with the result when the rollback is done, 202 (with requestId) when the wait ends first, 500 when it failed (the detail has the operator's message). Idempotency and X-Request-Id. The request's X-Request-Id header (1 to 64 letters, digits, '-' and '_') is the idempotency key of the request; without one the server generates an id and returns it in the X-Request-Id response header. Only the latest request of a branch is remembered. Sending the same id again returns the earlier result, including a Failed one (500): to retry after a failure, send a new id. The requestId in a 202 body is what to resend to follow the request. Reusing an id for a different request (another restore point, or a reset instead of a rollback, or the other way round) gets 409. A resend after a newer restore has finished on that branch runs again.",
+        "description": "Restores the branch to one of its own restore points. The current data is kept as a backup branch (<name>-before-<14 digits>, backupBranch of the result), which needs room: with as many backup branches as the project's branch limit the answer is 429 with Retry-After: 60, and the detail asks to delete an old backup branch. 404 when the restore point is not the branch's; 409 while another rollback or reset of the branch is open or the branch is being deleted, and when the branch's data has failed for good (DataReady false for a permanent reason, or Failed without data): the operator no longer acts on it, so delete it. The project must be Ready. Waits up to 30 seconds: 200 with the result when the rollback is done and the branch has settled (its phase is no longer Restoring), 202 (with requestId) when the wait ends first, 500 when it failed (the detail has the operator's message). Idempotency and X-Request-Id. The request's X-Request-Id header (1 to 64 letters, digits, '-' and '_') is the idempotency key of the request. A missing header, or one that is not 1 to 64 characters of [A-Za-z0-9_-], is replaced by an id the server makes and returns in the X-Request-Id response header, and a replaced id gives no idempotency: sent again without that id, the request is a new one. Only the latest request of a branch is remembered. Sending the same id again returns the earlier result, including a Failed one (500): to retry after a failure, send a new id. The requestId in a 202 body is what to resend to follow the request. Reusing an id for a different request (another restore point, or a reset instead of a rollback, or the other way round) gets 409. A resend after a newer restore has finished on that branch runs again.",
         "tags": [
           "Branches"
         ],
@@ -571,7 +571,7 @@
         },
         "responses": {
           "200": {
-            "description": "The rollback is done.",
+            "description": "The rollback is done; the branch is shown as it settled after it (its phase is no longer Restoring).",
             "content": {
               "application/json": {
                 "schema": {
@@ -791,7 +791,7 @@
         "name": "X-Request-Id",
         "in": "header",
         "required": false,
-        "description": "The idempotency key of a rollback or reset; see the operation. 1 to 64 letters, digits, '-' and '_'.",
+        "description": "The idempotency key of a rollback or reset; see the operation. 1 to 64 letters, digits, '-' and '_'. A missing header, or one that is not 1 to 64 characters of [A-Za-z0-9_-], is replaced by an id the server makes, which is returned in the X-Request-Id response header; a replaced id gives no idempotency.",
         "schema": {
           "type": "string",
           "pattern": "^[A-Za-z0-9_-]{1,64}$"

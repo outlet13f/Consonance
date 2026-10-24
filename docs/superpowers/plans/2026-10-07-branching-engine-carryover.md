@@ -141,8 +141,6 @@ VM·이미지:
 
 ## 계획 4(REST API 서버)에서
 
-- 실행이 끝날 때 컨트롤러가 리뷰에서 미뤄 둔 지적을 이 절 아래 `### 미뤄 둔 개선 사항`으로 더한다.
-
 ### 계획 5(배포·E2E·성능)가 반영할 것
 
 - API 서버 Deployment는 `consonance-system`에서 파드 라벨 `app.kubernetes.io/name: consonance-apiserver`, ClusterRole `consonance-apiserver`(`config/rbac/apiserver/role.yaml`), Secret `consonance-admin-key`(키 `key`)를 파일로 마운트해 `--admin-key-file`로 준다. `consonance/apiserver` 이미지는 아직 없다(스펙 7.6).
@@ -153,3 +151,25 @@ VM·이미지:
 - OpenAPI 문서(`internal/httpapi/openapi.json`)를 OpenAPI 3.1 검증기로 한 번 돌린다. 지금은 테스트로 경로·스키마만 맞춘다.
 - 리셋 요청을 받은 뒤 부모가 정지하면 오퍼레이터는 부모가 실행될 때까지 기다리고, 그동안 리셋을 취소할 방법이 없다(스펙 5장에 취소가 없다). API는 요청 시점의 부모 상태만 검사한다. 이 경우를 E2E에서 확인하고, 취소를 둘지 스펙에서 정한다.
 - 스펙 4.2의 Project phase `Pending`은 쓰는 코드가 없다(API는 phase가 빈 프로젝트를 `Provisioning`으로 보인다). 쓸지 목록에서 뺄지 스펙에서 정한다.
+- API 서버 플래그: `--listen-address`(기본 `:8080`, Service와 프로브 포트), `--storage-class`(기본 `consonance-xfs`, 다른 이름의 클래스면 지정), `--admin-key-file`(32바이트 이상). `GET /healthz`는 키 없이 열리므로 프로브에 Secret이 필요 없다.
+- API 서버 권한을 줄인다: 클러스터 전체 `secrets get`과 `namespaces create/delete`는 외부에 노출된 서비스에는 넓다. 프로젝트 네임스페이스마다 RoleBinding(`resourceNames: [db-credentials, internal-token]`)을 두거나, ValidatingAdmissionPolicy로 이 서비스 계정의 네임스페이스 삭제를 라벨 `app.kubernetes.io/managed-by: consonance-apiserver`가 있는 것으로 제한한다.
+- 인그레스(Envoy·Istio 등)가 바깥의 `X-Request-Id`를 덮어쓰지 않게 한다. 롤백·리셋의 멱등 키다.
+- 종료: SIGTERM을 받으면 바로 리스너를 닫으므로, 엔드포인트가 빠지는 몇 초 동안 새 요청이 거부된다. preStop에서 몇 초 기다리게 한다.
+
+### 미뤄 둔 개선 사항
+
+API·핸들러:
+
+- 브랜치 생성의 개수 검사와 생성이 원자적이지 않아 동시 요청이 `maxBranches`를 넘길 수 있다(파드 쿼터 `2 × maxBranches + 1`이 막는다). 롤백의 백업 브랜치 개수도 같다.
+- 이미 원하는 상태인 정지·기동은 쓰지 않고 캐시를 믿어, watch가 늦는 짧은 구간에 다른 클라이언트가 바꾼 상태를 놓칠 수 있다. 충돌 재시도도 캐시를 다시 읽어, 캐시가 늦으면 같은 ID 재전송이 앞 결과 대신 409가 될 수 있다.
+- 롤백·리셋의 앞 결과 재생이 `readyProject` 뒤에 있어, 프로젝트가 Ready가 아니게 되면 재전송이 409다.
+- 프로젝트 삭제의 라벨 확인과 삭제 사이에 UID 전제 조건이 없다. 공백만 있는 `displayName`을 받는다. 브랜치 응답은 phase가 `Failed`일 때만 이유를 보여, `ParentNotRunning`·`CopyFailed`로 멈춘 브랜치의 202에는 원인이 없다.
+- 복구 지점 생성은 본문 검사(400)를 프로젝트·브랜치 확인보다 먼저 한다. `restorePointOf`의 형식 검사는 두 호출자가 먼저 하므로 쓰이지 않는다. `restoreOpen`은 오퍼레이터의 `restorePending`을 복사한 것이다(내보내 함께 쓴다).
+- `writeProblem`은 `%w`로 감싼 `apiError`를 알아보지 못하고, `writeJSON`의 직렬화 실패는 problem+json이 아니다. `waitFor`는 제한 시간과 마지막 확인이 겹치면 한 번을 건너뛸 수 있다. `Waits`의 음수 값을 막지 않는다. 405는 OpenAPI에 없다.
+- `http.Server`에 `ReadTimeout`·`IdleTimeout`이 없다(롤백 대기 때문에 `WriteTimeout`은 두지 않는다). VolumeReady의 `NotBound` 이유는 상수가 아니다.
+
+테스트:
+
+- 가짜 클라이언트는 쓴 것을 바로 읽고 `generation`을 올리지 않아, 캐시 지연과 `observedGeneration` 관문의 통과 쪽은 단위 테스트로 시험하지 않는다(envtest의 실행 파일 테스트가 일부를 본다).
+- 시험하지 않는 것: `validRequestID`의 CR·LF·NUL, `fromAgent`의 `reflink-unsupported`, `fromKube`의 `IsInvalid`, `storageSize` 경계(1Gi·1G), `compute: {}`, 정리 삭제 실패, 접속 URI의 IPv6·데이터베이스 이스케이프(`pgconn.ParseConfig`로), 준비 안 된 프로젝트의 복구 지점 목록·삭제, 진행 중인 복구를 새로 연 충돌 재시도.
+- 가짜 에이전트는 데이터 없는 브랜치의 복구 지점 생성에 404를 주지 않고 목록을 오래된 순으로 준다(실제는 최신 먼저). 실행 파일 테스트는 바이너리를 다섯 번 빌드한다.
