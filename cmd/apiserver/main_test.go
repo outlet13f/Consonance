@@ -61,6 +61,7 @@ func apiServerUser(t *testing.T) string {
 	if err := env.Client.Create(ctx, &role); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = env.Client.Delete(context.Background(), &role) })
 	binding := &rbacv1.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: role.Name},
 		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
@@ -69,6 +70,7 @@ func apiServerUser(t *testing.T) string {
 	if err := env.Client.Create(ctx, binding); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = env.Client.Delete(context.Background(), binding) })
 	kubeconfig, err := env.AddUser("consonance-apiserver")
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +92,9 @@ func writeKey(t *testing.T, content string) string {
 }
 
 const adminKey = "test-admin-key"
+
+// httpClient has a timeout, so a hung server fails the test instead of leaving the child behind.
+var httpClient = &http.Client{Timeout: 15 * time.Second}
 
 func TestAPIServerWithItsOwnPermissions(t *testing.T) {
 	kubetest.Need(t, env)
@@ -131,9 +136,12 @@ func TestAPIServerWithItsOwnPermissions(t *testing.T) {
 		}
 	}()
 
+	// limit is how long wait waits: the start itself may take as long as the cache sync (30s)
+	// when a permission is missing, and then the process exits, which wait reports.
+	limit := 45 * time.Second
 	wait := func(what string, check func() bool) {
 		t.Helper()
-		deadline := time.Now().Add(20 * time.Second)
+		deadline := time.Now().Add(limit)
 		for !check() {
 			select {
 			case err := <-exited:
@@ -141,7 +149,7 @@ func TestAPIServerWithItsOwnPermissions(t *testing.T) {
 			default:
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("no %s after 20s", what)
+				t.Fatalf("no %s after %v", what, limit)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
@@ -162,7 +170,7 @@ func TestAPIServerWithItsOwnPermissions(t *testing.T) {
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -180,13 +188,14 @@ func TestAPIServerWithItsOwnPermissions(t *testing.T) {
 		return b
 	}
 	wait("healthz", func() bool {
-		resp, err := http.Get("http://" + addr + "/healthz")
+		resp, err := httpClient.Get("http://" + addr + "/healthz")
 		if err != nil {
 			return false
 		}
 		resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
 	})
+	limit = 20 * time.Second
 
 	// A project: its namespace and Project are made (namespaces create, projects create).
 	var created struct{ ID string }
@@ -298,13 +307,22 @@ func TestAPIServerWithItsOwnPermissions(t *testing.T) {
 		t.Errorf("uri %q", conn.URI)
 	}
 
+	// A branch is deleted (branches delete); there is no operator, so its finalizer-less object
+	// is gone, or going.
+	expect(http.StatusAccepted, http.MethodDelete, "/v1/projects/"+id+"/branches/feature", nil)
+	if err := env.Client.Get(ctx, client.ObjectKeyFromObject(&feature), &feature); err == nil && feature.DeletionTimestamp == nil {
+		t.Errorf("the branch is not deleted")
+	} else if err != nil && !apierrors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+
 	// Deleting the project deletes its namespace (namespaces get, delete).
 	expect(http.StatusAccepted, http.MethodDelete, "/v1/projects/"+id, nil)
 	if err := env.Client.Get(ctx, client.ObjectKey{Name: ns}, &gotNS); err != nil || gotNS.DeletionTimestamp == nil {
 		t.Errorf("namespace after delete: %v, %v", gotNS.DeletionTimestamp, err)
 	}
 
-	if strings.Contains(logs(), "Forbidden") {
+	if strings.Contains(strings.ToLower(logs()), "forbidden") {
 		t.Errorf("the API server was refused something:\n%s", logs())
 	}
 	if !strings.Contains(logs(), `"msg":"API server starting"`) {

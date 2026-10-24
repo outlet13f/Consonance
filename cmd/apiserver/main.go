@@ -103,11 +103,15 @@ func run(args []string) error {
 		return err
 	}
 
-	// SIGTERM or SIGINT stops the cache and the server.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	// SIGTERM or SIGINT stops the server. The cache has a context of its own, which ends after
+	// the server has: requests under way during the shutdown (a rollback waits on it) go on
+	// reading a live cache.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+	cacheCtx, stopCache := context.WithCancel(context.Background())
+	defer stopCache()
 
-	cached, reader, err := newClients(ctx, cfg, scheme)
+	cached, reader, err := newClients(cacheCtx, cfg, scheme)
 	if err != nil {
 		return err
 	}
@@ -133,12 +137,15 @@ func run(args []string) error {
 	select {
 	case err := <-serveErr:
 		return err
-	case <-ctx.Done():
+	case <-sigCtx.Done():
 	}
+	// Restore the default handling, so that a second signal ends the process at once.
+	stop()
 	logger.Info("API server stopping")
 	shutdown, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdown); err != nil {
+		_ = srv.Close()
 		return fmt.Errorf("shutdown: %w", err)
 	}
 	return nil
@@ -165,6 +172,10 @@ func newClients(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme) (
 		if _, err := c.GetInformer(syncCtx, obj); err != nil {
 			return nil, nil, fmt.Errorf("cache %T: %w", obj, err)
 		}
+	}
+	// GetInformer can return before Start has run, and then it does not wait for the sync.
+	if !c.WaitForCacheSync(syncCtx) {
+		return nil, nil, errors.New("cache did not sync")
 	}
 	cached, err := client.New(cfg, client.Options{
 		Scheme: scheme,
