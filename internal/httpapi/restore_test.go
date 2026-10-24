@@ -315,6 +315,71 @@ func TestRestoreWithTheSameRequestIDReturnsTheEarlierResult(t *testing.T) {
 	}
 }
 
+// An id that was used for a rollback to a restore point is that request only: another restore
+// point, or a reset, under the same id is a different request and must not get the old result.
+func TestReusedRequestIDForADifferentRollbackIsConflict(t *testing.T) {
+	srv, updates := reusedIDServer(t)
+	resp, body := post(t, srv, rollbackURL, map[string]any{"restorePointId": rpMain}, map[string]string{"X-Request-Id": "r1"})
+	p := wantProblem(t, resp, body, http.StatusConflict, typeConflict)
+	if p.Detail != "X-Request-Id r1 was used for a different request" {
+		t.Errorf("detail = %q", p.Detail)
+	}
+	if n := updates.Load(); n != 0 {
+		t.Errorf("%d Updates, want none", n)
+	}
+	// The same request still gets its result.
+	resp, body = post(t, srv, rollbackURL, map[string]any{"restorePointId": rpDev}, map[string]string{"X-Request-Id": "r1"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("same rollback: status = %d, want 200; body %s", resp.StatusCode, body)
+	}
+	if v := decode[restoreResult](t, body); v.BackupBranch != "dev-before-20261024010203" || v.RestorePointID != "" {
+		t.Errorf("result = %+v", v)
+	}
+}
+
+func TestReusedRequestIDForResetAfterRollbackIsConflict(t *testing.T) {
+	srv, updates := reusedIDServer(t)
+	resp, body := post(t, srv, resetURL, nil, map[string]string{"X-Request-Id": "r1"})
+	wantProblem(t, resp, body, http.StatusConflict, typeConflict)
+	if n := updates.Load(); n != 0 {
+		t.Errorf("%d Updates, want none", n)
+	}
+}
+
+// The id of the open request in the spec is held to the same: it is that request only.
+func TestReusedRequestIDOfTheOpenRequestForADifferentOneIsConflict(t *testing.T) {
+	objs := restoreObjs()
+	dev := objs[len(objs)-1].(*v1alpha1.Branch)
+	dev.Spec.Restore = &v1alpha1.RestoreRequest{RequestID: "r1", Source: v1alpha1.BranchSource{Type: v1alpha1.SourceParentLatest}}
+	srv, _, _ := newTestServer(t, objs...)
+	resp, body := post(t, srv, rollbackURL, map[string]any{"restorePointId": rpDev}, map[string]string{"X-Request-Id": "r1"})
+	wantProblem(t, resp, body, http.StatusConflict, typeConflict)
+}
+
+// reusedIDServer is a project whose dev rolled back to rpDev under the request id r1, with the
+// restore points of dev and main in the agent, and a count of the Updates the server makes.
+func reusedIDServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var updates atomic.Int32
+	objs := restoreObjs()
+	dev := objs[len(objs)-1].(*v1alpha1.Branch)
+	dev.Status.LastRestore = &v1alpha1.RestoreStatus{
+		RequestID: "r1", Phase: v1alpha1.RestoreDone, BackupBranch: "dev-before-20261024010203",
+		Source: v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: rpDev},
+	}
+	srv, _, agents := newTestServerWith(t, func(cfg *Config) {
+		cfg.Client = interceptor.NewClient(cfg.Client.(client.WithWatch), interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updates.Add(1)
+				return c.Update(ctx, obj, opts...)
+			},
+		})
+	}, objs...)
+	agents.add(testNS, agentapi.RestorePoint{ID: rpDev, Branch: "dev"})
+	agents.add(testNS, agentapi.RestorePoint{ID: rpMain, Branch: "dev"})
+	return srv, &updates
+}
+
 // A request repeated while its first one still waits is the same request, not a conflict.
 func TestRestoreWithTheRequestIDOfTheOpenRequestWaitsForIt(t *testing.T) {
 	objs := restoreObjs()

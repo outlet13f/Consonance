@@ -74,7 +74,7 @@ func (s *server) restore(w http.ResponseWriter, r *http.Request, kind restoreKin
 	ns := controller.NamespacePrefix + id
 	reqID := requestIDOf(ctx)
 
-	b, err := s.requestRestore(ctx, p, ns, name, reqID, kind)
+	b, source, err := s.requestRestore(ctx, p, ns, name, reqID, kind)
 	if err != nil {
 		return err
 	}
@@ -113,21 +113,25 @@ func (s *server) restore(w http.ResponseWriter, r *http.Request, kind restoreKin
 		return internal(errors.New(msg))
 	}
 	res := restoreResult{Branch: branchViewOf(b)}
-	if kind.reset {
-		res.RestorePointID = b.Status.LastRestore.RestorePointID
-	} else {
+	// What the request was decides the body, and for a repeat that is the earlier request.
+	if source.Type == v1alpha1.SourceRestorePoint {
 		res.BackupBranch = b.Status.LastRestore.BackupBranch
+	} else {
+		res.RestorePointID = b.Status.LastRestore.RestorePointID
 	}
 	writeJSON(w, http.StatusOK, res)
 	return nil
 }
 
 // requestRestore writes spec.restore of the branch, after the checks, and returns the Branch as
-// written. A request whose id is the one of the last restore, or of the open one in the spec, is
-// a repeat of that request: nothing is checked or written, and the caller waits for its result.
-// A conflict is retried on a fresh read, which decides everything again: the operator wins
-// races, and so does another restore request.
-func (s *server) requestRestore(ctx context.Context, p *v1alpha1.Project, ns, name, reqID string, kind restoreKind) (*v1alpha1.Branch, error) {
+// written with the source of the request. A request whose id is the one of the last restore, or
+// of the open one in the spec, is a repeat of that request when it asks for the same source:
+// nothing is checked or written, the caller waits for the result, and the source returned is the
+// earlier one. The same id for another source (another restore point, or a reset instead of a
+// rollback) is a different request and a 409. A conflict on the write is retried on a fresh
+// read, which decides everything again: the operator wins races, and so does another restore
+// request.
+func (s *server) requestRestore(ctx context.Context, p *v1alpha1.Project, ns, name, reqID string, kind restoreKind) (*v1alpha1.Branch, v1alpha1.BranchSource, error) {
 	var lastErr error
 	for try := 0; try < restoreUpdateTries; try++ {
 		if try > 0 {
@@ -135,33 +139,53 @@ func (s *server) requestRestore(ctx context.Context, p *v1alpha1.Project, ns, na
 			select {
 			case <-time.After(pollInterval):
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, kind.source, ctx.Err()
 			}
 		}
 		b, err := s.branch(ctx, ns, name)
 		if err != nil {
-			return nil, err
+			return nil, kind.source, err
 		}
-		if lr := b.Status.LastRestore; lr != nil && lr.RequestID == reqID {
-			return b, nil
-		}
-		if req := b.Spec.Restore; req != nil && req.RequestID == reqID {
-			return b, nil
+		if earlier, ok := earlierSource(b, reqID); ok {
+			// A source the operator did not record cannot be told apart: it is taken as the same.
+			if earlier.Type != "" && earlier != kind.source {
+				return nil, kind.source, conflict("X-Request-Id %s was used for a different request", reqID)
+			}
+			if earlier.Type == "" {
+				earlier = kind.source
+			}
+			return b, earlier, nil
 		}
 		if err := s.checkRestore(ctx, p, ns, b, kind); err != nil {
-			return nil, err
+			return nil, kind.source, err
 		}
 		b.Spec.Restore = &v1alpha1.RestoreRequest{RequestID: reqID, Source: kind.source}
 		switch err := s.client.Update(ctx, b); {
 		case err == nil:
-			return b, nil
+			return b, kind.source, nil
 		case apierrors.IsConflict(err):
 			lastErr = err
 		default:
-			return nil, fromKube(err)
+			return nil, kind.source, fromKube(err)
 		}
 	}
-	return nil, conflict("branch %s was changed by someone else: %v", name, lastErr)
+	return nil, kind.source, conflict("branch %s was changed by someone else: %v", name, lastErr)
+}
+
+// earlierSource is the source of the restore of b that has the request id, from its status or,
+// while the operator has not started it, from its spec. The type is empty when the status does
+// not say.
+func earlierSource(b *v1alpha1.Branch, reqID string) (v1alpha1.BranchSource, bool) {
+	if lr := b.Status.LastRestore; lr != nil && lr.RequestID == reqID {
+		if lr.Source.Type == "" && b.Spec.Restore != nil && b.Spec.Restore.RequestID == reqID {
+			return b.Spec.Restore.Source, true
+		}
+		return lr.Source, true
+	}
+	if req := b.Spec.Restore; req != nil && req.RequestID == reqID {
+		return req.Source, true
+	}
+	return v1alpha1.BranchSource{}, false
 }
 
 // checkRestore is what has to hold before a restore of b is asked for, so the request is
