@@ -103,6 +103,7 @@ func (s *server) endpoints() []endpoint {
 	}
 	eps = append(eps, s.projectEndpoints()...)
 	eps = append(eps, s.branchEndpoints()...)
+	eps = append(eps, s.connectionEndpoints()...)
 	return append(eps, s.restorePointEndpoints()...)
 }
 
