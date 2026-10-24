@@ -320,3 +320,9 @@ func TestRestoreOpen(t *testing.T) {
 		})
 	}
 }
+
+func TestStartOfABranchWhoseDataFailedIsConflict(t *testing.T) {
+	srv, _, updates := dataFailedServer(t, dataFailedObjs(v1alpha1.StateStopped))
+	resp, body := call(t, srv, http.MethodPost, startURL, nil)
+	wantDataFailed(t, resp, body, updates)
+}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
@@ -485,4 +486,88 @@ func TestRestoreOfDeletingBranchIsConflict(t *testing.T) {
 	srv, _, _ := newTestServer(t, objs...)
 	resp, body := call(t, srv, http.MethodPost, resetURL, nil)
 	wantProblem(t, resp, body, http.StatusConflict, typeConflict)
+}
+
+// dataFailedObjs is a ready project whose dev failed for good: Failed without data, with
+// DataReady=False for SourceNotFound. The operator no longer reads its spec (spec 10).
+func dataFailedObjs(state v1alpha1.DesiredState) []client.Object {
+	dev := branchObj("dev", "main", v1alpha1.BranchFailed)
+	dev.Spec.State = state
+	dev.Status.DataGeneration = 0
+	dev.Status.Conditions = []metav1.Condition{{
+		Type: v1alpha1.ConditionDataReady, Status: metav1.ConditionFalse, Reason: v1alpha1.ReasonSourceNotFound, Message: "restore point " + rpMain + " not found",
+	}}
+	return append(readyProjectObjs(testProject), dev)
+}
+
+// dataFailedServer serves objs with short waits and counts the Updates the server makes.
+func dataFailedServer(t *testing.T, objs []client.Object) (*httptest.Server, *fakeAgents, *atomic.Int32) {
+	t.Helper()
+	var updates atomic.Int32
+	srv, _, agents := newTestServerWith(t, func(cfg *Config) {
+		cfg.Waits = Waits{State: 200 * time.Millisecond, Restore: 200 * time.Millisecond}
+		cfg.Client = interceptor.NewClient(cfg.Client.(client.WithWatch), interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updates.Add(1)
+				return c.Update(ctx, obj, opts...)
+			},
+		})
+	}, objs...)
+	return srv, agents, &updates
+}
+
+// wantDataFailed fails unless the answer is the 409 of a branch whose data failed, and nothing
+// was written.
+func wantDataFailed(t *testing.T, resp *http.Response, body []byte, updates *atomic.Int32) {
+	t.Helper()
+	p := wantProblem(t, resp, body, http.StatusConflict, typeConflict)
+	if want := "branch dev has failed (SourceNotFound): restore point " + rpMain + " not found; delete it"; p.Detail != want {
+		t.Errorf("detail = %q, want %q", p.Detail, want)
+	}
+	if n := updates.Load(); n != 0 {
+		t.Errorf("%d Updates, want none", n)
+	}
+}
+
+func TestResetOfABranchWhoseDataFailedIsConflict(t *testing.T) {
+	srv, _, updates := dataFailedServer(t, dataFailedObjs(v1alpha1.StateRunning))
+	resp, body := call(t, srv, http.MethodPost, resetURL, nil)
+	wantDataFailed(t, resp, body, updates)
+}
+
+func TestRollbackOfABranchWhoseDataFailedIsConflict(t *testing.T) {
+	srv, agents, updates := dataFailedServer(t, dataFailedObjs(v1alpha1.StateRunning))
+	agents.add(testNS, agentapi.RestorePoint{ID: rpDev, Branch: "dev"})
+	resp, body := call(t, srv, http.MethodPost, rollbackURL, map[string]any{"restorePointId": rpDev})
+	wantDataFailed(t, resp, body, updates)
+}
+
+// The operator records Done while the phase is still Restoring and moves the phase on right
+// after: the 200 waits for that, so it shows the branch as it settled.
+func TestRestoreWaitsForTheBranchToSettle(t *testing.T) {
+	srv, c, _ := newTestServer(t, restoreObjs()...)
+	afterDelay(100*time.Millisecond, func() {
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			var b v1alpha1.Branch
+			if err := c.Get(context.Background(), client.ObjectKey{Namespace: testNS, Name: "dev"}, &b); err == nil && b.Spec.Restore != nil {
+				setBranchStatus(t, c, testNS, "dev", func(s *v1alpha1.BranchStatus) {
+					s.Phase = v1alpha1.BranchRestoring
+					s.LastRestore = &v1alpha1.RestoreStatus{RequestID: b.Spec.Restore.RequestID, Phase: v1alpha1.RestoreDone, RestorePointID: rpDev}
+				})
+				time.Sleep(200 * time.Millisecond)
+				setBranchStatus(t, c, testNS, "dev", func(s *v1alpha1.BranchStatus) { s.Phase = v1alpha1.BranchRunning })
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Errorf("the request never wrote spec.restore")
+	})
+	resp, body := call(t, srv, http.MethodPost, resetURL, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", resp.StatusCode, body)
+	}
+	if v := decode[restoreResult](t, body); v.Branch.Phase != "Running" || v.RestorePointID != rpDev {
+		t.Errorf("result = %+v, want the branch Running after the reset", v)
+	}
 }

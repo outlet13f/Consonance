@@ -62,7 +62,8 @@ func (s *server) rollbackBranch(w http.ResponseWriter, r *http.Request) error {
 }
 
 // restore asks the operator for a rollback or reset of the branch and waits for it: 200 when
-// lastRestore of this request is Done, 500 when it is Failed, 202 when the wait is over first.
+// lastRestore of this request is Done and the phase is no longer Restoring, 500 when it is
+// Failed, 202 when the wait is over first.
 func (s *server) restore(w http.ResponseWriter, r *http.Request, kind restoreKind) error {
 	ctx := r.Context()
 	id, name := r.PathValue("projectId"), r.PathValue("branch")
@@ -80,14 +81,16 @@ func (s *server) restore(w http.ResponseWriter, r *http.Request, kind restoreKin
 	}
 
 	// Only the lastRestore of this request counts: a read that is behind the write then delays
-	// the answer and cannot make it wrong.
+	// the answer and cannot make it wrong. The operator records the end while the phase is still
+	// Restoring and moves it on right after, so the wait is also for that: the answer shows the
+	// branch as it settled.
 	var failed bool
 	done, err := waitFor(ctx, s.waits.Restore, func(ctx context.Context) (bool, error) {
 		if visible, err := s.refresh(ctx, b); err != nil || !visible {
 			return false, err
 		}
 		lr := b.Status.LastRestore
-		if lr == nil || lr.RequestID != reqID {
+		if lr == nil || lr.RequestID != reqID || b.Status.Phase == v1alpha1.BranchRestoring {
 			return false, nil
 		}
 		switch lr.Phase {
@@ -196,6 +199,9 @@ func (s *server) checkRestore(ctx context.Context, p *v1alpha1.Project, ns strin
 	}
 	if b.DeletionTimestamp != nil || b.Status.Phase == v1alpha1.BranchDeleting {
 		return conflict("branch %s is being deleted", b.Name)
+	}
+	if err := dataFailed(b); err != nil {
+		return err
 	}
 	if restoreOpen(b) {
 		return conflict("a rollback or reset is in progress")

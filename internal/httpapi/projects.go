@@ -119,13 +119,19 @@ func viewOf(id string, p *v1alpha1.Project) projectView {
 }
 
 // project reads the Project of project id. An id of the wrong form is a 404 without asking the
-// cluster, so a request cannot make the API server look up arbitrary names.
+// cluster, so a request cannot make the API server look up arbitrary names. A Project the cache
+// does not have is looked for in the cluster before the 404: the cache of this replica may be
+// behind a create another one (or this one) has just answered.
 func (s *server) project(ctx context.Context, id string) (*v1alpha1.Project, error) {
 	if !validProjectID(id) {
 		return nil, notFound("no project %q", id)
 	}
+	key := client.ObjectKey{Namespace: controller.NamespacePrefix + id, Name: controller.ProjectName}
 	var p v1alpha1.Project
-	err := s.client.Get(ctx, client.ObjectKey{Namespace: controller.NamespacePrefix + id, Name: controller.ProjectName}, &p)
+	err := s.client.Get(ctx, key, &p)
+	if apierrors.IsNotFound(err) {
+		err = s.reader.Get(ctx, key, &p)
+	}
 	switch {
 	case apierrors.IsNotFound(err):
 		return nil, notFound("no project %q", id)

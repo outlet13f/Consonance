@@ -226,6 +226,33 @@ func TestGetProject(t *testing.T) {
 	wantProblem(t, resp, body, http.StatusNotFound, typeNotFound)
 }
 
+// A replica whose cache is behind does not have the Project yet when the create's 202 has
+// gone out: the cluster has it, so the answer is not a 404.
+func TestGetProjectRightAfterCreateIsNotNotFound(t *testing.T) {
+	srv, _, _ := newTestServerWith(t, func(cfg *Config) {
+		cfg.Client = interceptor.NewClient(cfg.Client.(client.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*v1alpha1.Project); ok {
+					return apierrors.NewNotFound(v1alpha1.GroupVersion.WithResource("projects").GroupResource(), key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+	})
+	resp, body := call(t, srv, http.MethodPost, "/v1/projects", map[string]any{"displayName": "my-app"})
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("create: status = %d, want 202; body %s", resp.StatusCode, body)
+	}
+	id := decode[projectView](t, body).ID
+	resp, body = call(t, srv, http.MethodGet, "/v1/projects/"+id, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("get: status = %d, want 200; body %s", resp.StatusCode, body)
+	}
+	if v := decode[projectView](t, body); v.ID != id || v.DisplayName != "my-app" {
+		t.Errorf("view = %+v", v)
+	}
+}
+
 func TestMalformedProjectIDIsNotFound(t *testing.T) {
 	var gets atomic.Int32
 	cfg, _, _ := testConfig()

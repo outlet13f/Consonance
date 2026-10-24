@@ -118,7 +118,7 @@ func run(args []string) error {
 	handler := httpapi.New(httpapi.Config{
 		Client:       cached,
 		Reader:       reader,
-		Agents:       httpapi.HTTPAgents{HTTP: &http.Client{}},
+		Agents:       httpapi.HTTPAgents{}, // a nil client: agentclient.New then keeps its 60s timeout
 		AdminKey:     key,
 		StorageClass: c.storageClass,
 		Log:          logger,

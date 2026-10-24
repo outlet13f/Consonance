@@ -99,6 +99,15 @@ func TestOnlyHealthzAndOpenAPIArePublic(t *testing.T) {
 			t.Errorf("GET %s without a key = %d %s", path, resp.StatusCode, body)
 		}
 	}
+
+	// GET only: HEAD is behind the key, and with it the mux serves HEAD as GET. A HEAD answer
+	// has no body, so only the status is checked.
+	if resp, _ := callWith(t, srv, http.MethodHead, "/healthz", nil, ""); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("HEAD /healthz without a key = %d, want 401", resp.StatusCode)
+	}
+	if resp, _ := call(t, srv, http.MethodHead, "/healthz", nil); resp.StatusCode != http.StatusOK {
+		t.Errorf("HEAD /healthz with the key = %d, want 200", resp.StatusCode)
+	}
 }
 
 func TestUnknownRouteIsProblem(t *testing.T) {

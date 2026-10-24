@@ -37,6 +37,25 @@ func restoreOpen(b *v1alpha1.Branch) bool {
 	return req != nil && req.RequestID != "" && (lr == nil || lr.RequestID != req.RequestID)
 }
 
+// dataFailed is the 409 of a branch the operator has given up on: DataReady is false for a
+// reason retrying cannot fix, or the branch is Failed without data. The operator reads neither
+// spec.restore nor spec.state of it again (spec 10), so a request would wait for nothing and a
+// restore would stay open for ever. It is nil for any other branch.
+func dataFailed(b *v1alpha1.Branch) error {
+	c := falseCondition(b, v1alpha1.ConditionDataReady)
+	if c == nil || !v1alpha1.PermanentDataFailure(c.Reason) {
+		if b.Status.Phase != v1alpha1.BranchFailed || b.Status.DataGeneration != 0 {
+			return nil
+		}
+		c = falseCondition(b, v1alpha1.ConditionDataReady, v1alpha1.ConditionReady)
+	}
+	reason, msg := string(v1alpha1.BranchFailed), "it has no data"
+	if c != nil {
+		reason, msg = c.Reason, c.Message
+	}
+	return conflict("branch %s has failed (%s): %s; delete it", b.Name, reason, msg)
+}
+
 // stopBranch stops a branch. A project that is not Ready may be stopped: stopping must always
 // work.
 func (s *server) stopBranch(w http.ResponseWriter, r *http.Request) error {
@@ -152,6 +171,9 @@ func (s *server) setState(ctx context.Context, ns, name string, want v1alpha1.De
 		}
 		if b.DeletionTimestamp != nil || b.Status.Phase == v1alpha1.BranchDeleting {
 			return nil, conflict("branch %s is being deleted", name)
+		}
+		if err := dataFailed(b); err != nil {
+			return nil, err
 		}
 		if restoreOpen(b) {
 			return nil, conflict("branch %s has a rollback or reset under way", name)

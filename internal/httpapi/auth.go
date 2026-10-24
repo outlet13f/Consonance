@@ -24,9 +24,10 @@ func (s *server) authorized(r *http.Request) bool {
 
 // isPublic is the whole set of requests that need no key: the probe and the API document. It is
 // a list and not a prefix rule, so a path that is not named here, under /v1 or outside it, is
-// behind the key, and a route added later is too. HEAD goes with GET, as the mux serves it.
+// behind the key, and a route added later is too. It is GET only: HEAD, which the mux serves
+// for a GET route, needs the key like everything else.
 func isPublic(method, path string) bool {
-	if method != http.MethodGet && method != http.MethodHead {
+	if method != http.MethodGet {
 		return false
 	}
 	return path == "/healthz" || path == openAPIPath
