@@ -283,8 +283,18 @@ func TestBranchLimit(t *testing.T) {
 	if resp.Header.Get("Retry-After") != "60" {
 		t.Errorf("Retry-After = %q, want 60", resp.Header.Get("Retry-After"))
 	}
-	if !strings.Contains(p.Detail, "2 of 2") {
+	if !strings.Contains(p.Detail, "2 of 2") || strings.Contains(p.Detail, "being deleted") {
 		t.Errorf("detail = %q, want the count and the limit", p.Detail)
+	}
+
+	// A branch that is being deleted still counts, and the detail says so: room comes soon.
+	objs = append(readyProjectObjs(testProject), branchObj("a", "main", v1alpha1.BranchDeleting))
+	objs[1].(*v1alpha1.Project).Spec.Limits.MaxBranches = 2
+	srv, _, _ = newTestServerWith(t, func(cfg *Config) { cfg.Waits.Create = 100 * time.Millisecond }, objs...)
+	resp, body = call(t, srv, http.MethodPost, branchesURL, map[string]any{"name": "b"})
+	p = wantProblem(t, resp, body, http.StatusTooManyRequests, typeRateLimited)
+	if want := "the project has 2 of 2 branches (1 being deleted)"; p.Detail != want {
+		t.Errorf("detail = %q, want %q", p.Detail, want)
 	}
 
 	// Backup branches are counted apart: main alone is one user branch.

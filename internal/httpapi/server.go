@@ -4,8 +4,11 @@
 package httpapi
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -123,8 +126,8 @@ func (s *server) routes() []route {
 // methods are the ones a 405 looks for, in the order of the Allow header.
 var methods = []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 
-// handler builds the router: the log and request id around the key check (everything but the
-// public set of isPublic) around a ServeMux.
+// handler builds the router: the log and request id around the recovery from a panic, around
+// the key check (everything but the public set of isPublic), around a ServeMux.
 // The mux answers neither 404 nor 405 with a problem, so a catch-all route does it.
 func (s *server) handler(eps []endpoint) http.Handler {
 	mux := http.NewServeMux()
@@ -149,14 +152,35 @@ func (s *server) handler(eps []endpoint) http.Handler {
 		w.Header().Set("Allow", strings.Join(allow, ", "))
 		writeProblem(w, r, &apiError{Status: http.StatusMethodNotAllowed, Type: typeValidation, Detail: r.Method + " is not allowed here; use " + strings.Join(allow, ", ")})
 	})
-	return s.logged(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return s.logged(recovered(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isPublic(r.Method, r.URL.Path) && !s.authorized(r) {
 			setOp(r.Context(), "unauthorized")
 			unauthorized(w, r)
 			return
 		}
 		mux.ServeHTTP(w, r)
-	}))
+	})))
+}
+
+// recovered turns a panic of next into a 500 problem, and puts the panic and its stack into
+// the request's log line, which is at level Error for a 500: net/http would print the stack to
+// stderr outside the JSON log and drop the connection. http.ErrAbortHandler is the panic that
+// asks for the drop, so it goes on up.
+func recovered(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			if v == http.ErrAbortHandler {
+				panic(v)
+			}
+			logAttrs(r.Context(), "panic", fmt.Sprint(v), "stack", string(debug.Stack()))
+			writeProblem(w, r, internal(errors.New("internal error")))
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // route names the request for the log and turns a returned error into a problem.

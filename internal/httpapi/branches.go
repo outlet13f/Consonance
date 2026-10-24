@@ -159,20 +159,25 @@ func (s *server) branch(ctx context.Context, ns, name string) (*v1alpha1.Branch,
 }
 
 // countBranches counts the branches of a project: those a user made (main included) and the
-// backup branches of rollbacks, which have their own limit (decision 1).
-func (s *server) countBranches(ctx context.Context, ns string) (user, backups int, err error) {
+// backup branches of rollbacks, which have their own limit (decision 1). userDeleting is how many
+// of the user's are being deleted: they still count, but the room they take comes back soon.
+func (s *server) countBranches(ctx context.Context, ns string) (user, backups, userDeleting int, err error) {
 	var list v1alpha1.BranchList
 	if err := s.client.List(ctx, &list, client.InNamespace(ns)); err != nil {
-		return 0, 0, fromKube(err)
+		return 0, 0, 0, fromKube(err)
 	}
 	for i := range list.Items {
-		if isBackup(&list.Items[i]) {
+		b := &list.Items[i]
+		if isBackup(b) {
 			backups++
-		} else {
-			user++
+			continue
+		}
+		user++
+		if b.DeletionTimestamp != nil || b.Status.Phase == v1alpha1.BranchDeleting {
+			userDeleting++
 		}
 	}
-	return user, backups, nil
+	return user, backups, userDeleting, nil
 }
 
 // spec checks the request, but for the name (createBranch does that first), and returns the Branch spec it asks for, with the defaults filled in.
@@ -277,14 +282,18 @@ func (s *server) createBranch(w http.ResponseWriter, r *http.Request) error {
 		return conflict("parent %s is being deleted", parent.Name)
 	}
 
-	user, _, err := s.countBranches(ctx, ns)
+	user, _, deleting, err := s.countBranches(ctx, ns)
 	if err != nil {
 		return err
 	}
 	if limit := int(p.Spec.Limits.MaxBranches); user >= limit {
+		detail := fmt.Sprintf("the project has %d of %d branches", user, limit)
+		if deleting > 0 {
+			detail += fmt.Sprintf(" (%d being deleted)", deleting)
+		}
 		return &apiError{
 			Status: http.StatusTooManyRequests, Type: typeRateLimited, RetryAfter: branchRetryAfter,
-			Detail: fmt.Sprintf("the project has %d of %d branches", user, limit),
+			Detail: detail,
 		}
 	}
 

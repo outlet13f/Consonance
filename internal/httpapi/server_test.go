@@ -274,6 +274,26 @@ func TestProblemFromPlainError(t *testing.T) {
 	}
 }
 
+// A handler that panics answers a problem, and the panic is in the request's JSON log line
+// instead of a stack on stderr.
+func TestPanicIsAProblem(t *testing.T) {
+	var buf syncBuffer
+	cfg, _, _ := testConfig()
+	cfg.Log = slog.New(slog.NewJSONHandler(&buf, nil))
+	srv := newServerWithRoutes(t, cfg, endpoint{route{http.MethodGet, "/v1/panic", "test.panic"}, func(w http.ResponseWriter, r *http.Request) error {
+		panic("nil map")
+	}})
+	resp, body := call(t, srv, http.MethodGet, "/v1/panic", nil)
+	wantProblem(t, resp, body, http.StatusInternalServerError, typeInternal)
+	rec := firstLogLine(t, &buf)
+	if id := resp.Header.Get("X-Request-Id"); id == "" || rec["requestId"] != id {
+		t.Errorf("log line requestId = %v, want the X-Request-Id of the response %q", rec["requestId"], id)
+	}
+	if p, _ := rec["panic"].(string); !strings.Contains(p, "nil map") || rec["level"] != "ERROR" || rec["status"] != float64(500) {
+		t.Errorf("log line = %v, want the panic at level ERROR with status 500", rec)
+	}
+}
+
 func TestApiErrorHelpers(t *testing.T) {
 	for _, c := range []struct {
 		err    *apiError

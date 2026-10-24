@@ -225,7 +225,7 @@ func (s *server) checkRestore(ctx context.Context, p *v1alpha1.Project, ns strin
 	if _, err := s.restorePointOf(ctx, ns, b.Name, kind.source.RestorePointID); err != nil {
 		return err
 	}
-	_, backups, err := s.countBranches(ctx, ns)
+	_, backups, _, err := s.countBranches(ctx, ns)
 	if err != nil {
 		return err
 	}

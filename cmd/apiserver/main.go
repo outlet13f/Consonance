@@ -39,6 +39,9 @@ const (
 	shutdownTimeout = 35 * time.Second
 	// cacheSyncTimeout is how long the start waits for the first list of Projects and Branches.
 	cacheSyncTimeout = 30 * time.Second
+	// minAdminKeyLen is the shortest admin key the server takes: the key is all that guards an
+	// API exposed outside the cluster, so it must not be one a caller can guess.
+	minAdminKeyLen = 32
 )
 
 func main() {
@@ -91,6 +94,9 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(key) < minAdminKeyLen {
+		return fmt.Errorf("the admin key in %s is %d bytes; it must be at least %d bytes", c.adminKeyFile, len(key), minAdminKeyLen)
+	}
 	cfg, err := restConfig(c.kubeconfig)
 	if err != nil {
 		return err
@@ -125,7 +131,9 @@ func run(args []string) error {
 	})
 	// There is no WriteTimeout: a rollback may hold its response for 30s, and a limit that cut
 	// it off would answer nothing for work that went on.
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
+	// ErrorLog: what net/http reports itself (an accept error, a superfluous WriteHeader) goes
+	// to the JSON log too.
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: readHeaderTimeout, ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError)}
 	ln, err := net.Listen("tcp", c.listenAddress)
 	if err != nil {
 		return err
@@ -157,7 +165,9 @@ func run(args []string) error {
 // cache would need list and watch on every Secret in the cluster, and a namespace check must see
 // what the cluster has now.
 func newClients(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme) (client.Client, client.Reader, error) {
-	c, err := cache.New(cfg, cache.Options{Scheme: scheme})
+	// ReaderFailOnMissingInformer: a cached read of a type that has no informer here fails, and
+	// does not start a cluster-wide informer the role may not allow.
+	c, err := cache.New(cfg, cache.Options{Scheme: scheme, ReaderFailOnMissingInformer: true})
 	if err != nil {
 		return nil, nil, fmt.Errorf("cache: %w", err)
 	}

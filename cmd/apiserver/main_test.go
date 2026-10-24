@@ -91,7 +91,8 @@ func writeKey(t *testing.T, content string) string {
 	return path
 }
 
-const adminKey = "test-admin-key"
+// adminKey is as long as the API server asks for: 32 bytes.
+const adminKey = "test-admin-key-0123456789abcdefg"
 
 // httpClient has a timeout, so a hung server fails the test instead of leaving the child behind.
 var httpClient = &http.Client{Timeout: 15 * time.Second}
@@ -347,6 +348,15 @@ func TestRefusesAnEmptyAdminKey(t *testing.T) {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 1 || !strings.Contains(string(out), "is empty") {
 		t.Fatalf("empty key: %v\n%s", err, out)
+	}
+}
+
+func TestRefusesAShortAdminKey(t *testing.T) {
+	bin := buildAPIServer(t)
+	out, err := exec.Command(bin, "--admin-key-file", writeKey(t, adminKey[:31]+"\n")).CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 || !strings.Contains(string(out), "at least 32 bytes") {
+		t.Fatalf("31 byte key: %v\n%s", err, out)
 	}
 }
 
