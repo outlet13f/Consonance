@@ -1,4 +1,4 @@
-.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent generate envtest test-envtest
+.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent image-operator image-apiserver smoke-binaries load-images generate envtest test-envtest
 
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0
 SETUP_ENVTEST = go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
@@ -26,7 +26,7 @@ test-pg: ## all tests in a container on the Podman machine, with PostgreSQL 17 a
 test-xfs: ## internal/volume tests on XFS with reflink in a container on the Podman machine
 	hack/pg-test.sh -race -count=1 ./internal/volume/... ./internal/testutil/xfstest/...
 
-images: image-postgres image-agent ## build every image
+images: image-postgres image-agent image-operator image-apiserver ## build every image
 
 image-postgres: ## build consonance/postgres:17-dev for the local architecture
 	docker build -f images/postgres/Dockerfile -t consonance/postgres:17-dev .
@@ -39,6 +39,18 @@ image-agent: ## build consonance/agent:dev for the local architecture
 
 smoke-agent: image-agent ## run the agent image smoke test
 	test/image/agent-smoke.sh
+
+image-operator: ## build consonance/operator:dev (distroless, uid 65532)
+	docker build -f images/operator/Dockerfile -t consonance/operator:dev .
+
+image-apiserver: ## build consonance/apiserver:dev (distroless, uid 65532)
+	docker build -f images/apiserver/Dockerfile -t consonance/apiserver:dev .
+
+smoke-binaries: image-operator image-apiserver ## run the operator and API server image smoke test
+	test/image/binary-smoke.sh
+
+load-images: ## import the four images into the dev cluster's containerd (run make images first)
+	hack/load-images.sh
 
 dev-cluster: ## k3s on the Podman machine with StorageClass consonance-xfs; kubeconfig in bin/dev/kubeconfig
 	hack/dev-cluster.sh up
