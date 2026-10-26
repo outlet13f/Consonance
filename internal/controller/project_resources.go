@@ -216,7 +216,11 @@ func desiredAgentPod(p *v1alpha1.Project, projectID, image string) *corev1.Pod {
 	sc := restrictedPod()
 	sc.FSGroup = ptr.To(uid)
 	sc.FSGroupChangePolicy = ptr.To(corev1.FSGroupChangeOnRootMismatch) // no recursive chown of a large volume
-	res := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")}
+	// Spec 7.5's 100m/128Mi is what the agent reserves. Its CPU may burst to a core: a copy is
+	// a burst of reflink calls on the critical path of branch creation (spec 15), and capped at
+	// 100m a 1GB copy's tenth of a second of CPU stretched to a second of throttling.
+	req := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("128Mi")}
+	limits := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("128Mi")}
 	c := corev1.Container{
 		Name:            "agent",
 		Image:           image,
@@ -224,7 +228,7 @@ func desiredAgentPod(p *v1alpha1.Project, projectID, image string) *corev1.Pod {
 		Args:            agentArgs(p, projectID),
 		Ports:           []corev1.ContainerPort{{Name: "api", ContainerPort: int32(agentapi.DefaultPort)}},
 		VolumeMounts:    []corev1.VolumeMount{{Name: "volume", MountPath: "/volume"}, tokenMount},
-		Resources:       corev1.ResourceRequirements{Requests: res, Limits: res},
+		Resources:       corev1.ResourceRequirements{Requests: req, Limits: limits},
 		LivenessProbe:   httpProbe("/healthz", agentapi.DefaultPort, 10),
 		ReadinessProbe:  httpProbe("/healthz", agentapi.DefaultPort, 2),
 		SecurityContext: restrictedContainer(),

@@ -161,6 +161,15 @@ func TestAgentPod(t *testing.T) {
 	if mem := c.Resources.Limits[corev1.ResourceMemory]; mem.String() != "128Mi" {
 		t.Errorf("memory limit %s", mem.String())
 	}
+	// Spec 7.5's 100m/128Mi is what the agent reserves. A copy is a burst of reflink calls on
+	// the branch creation's critical path: capped at 100m, a 1GB copy's ~0.1s of CPU took ~1s
+	// (Task 11's measurement), so the CPU limit is one core.
+	if cpu, mem := c.Resources.Requests[corev1.ResourceCPU], c.Resources.Requests[corev1.ResourceMemory]; cpu.String() != "100m" || mem.String() != "128Mi" {
+		t.Errorf("requests cpu %s memory %s, want 100m 128Mi", cpu.String(), mem.String())
+	}
+	if cpu := c.Resources.Limits[corev1.ResourceCPU]; cpu.String() != "1" {
+		t.Errorf("cpu limit %s, want 1", cpu.String())
+	}
 	if !mounts(c, "volume", "/volume") || !mounts(c, "token", "/etc/consonance/token") {
 		t.Errorf("mounts %+v", c.VolumeMounts)
 	}
