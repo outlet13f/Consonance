@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -33,10 +31,23 @@ type metric struct {
 	forward  []time.Duration // first query: the port-forward of the try that answered
 	tries    []int           // first query: tries until one answered
 	pending  int             // project creation: FailedScheduling events in the projects
+	loadTPS  []float64       // write condition, rb: the tps of rb's own load during each run
+	latest   time.Duration   // the value of the last run, warm-up included
 }
+
+// addLoad records the tps of the load on rb during run i, the warm-up left out.
+func (m *metric) addLoad(i int, tps float64) {
+	if i > 0 {
+		m.loadTPS = append(m.loadTPS, tps)
+	}
+}
+
+// last is the value of the last run added.
+func (m *metric) last() time.Duration { return m.latest }
 
 // add records run i; run 0 is the warm-up, which is kept apart (plan 5 Review Focus 4).
 func (m *metric) add(i int, d time.Duration) {
+	m.latest = d
 	if i == 0 {
 		m.warmup = d
 		return
@@ -94,6 +105,7 @@ type conditionResult struct {
 	name     string
 	metrics  []*metric
 	load     loadResult // the write condition's
+	copies   copyStats  // the copies of main of the branch creations
 	operator []operatorMean
 	pending  int // FailedScheduling events in the measured project
 }
@@ -103,6 +115,8 @@ type results struct {
 	started, finished time.Time
 	runs, scale       int
 	copyInterval      time.Duration
+	hostStart         string // hostLoad and machinePressure when the run started and ended
+	hostEnd           string
 	env               environmentInfo
 	data              dataResult
 	conditions        []*conditionResult
@@ -164,7 +178,22 @@ func writeDoc(path string, r *results) error {
 			if m.pending > 0 {
 				w(", 측정한 프로젝트들의 FailedScheduling 이벤트 %d건", m.pending)
 			}
+			if len(m.loadTPS) > 0 {
+				var sum float64
+				for _, v := range m.loadTPS {
+					sum += v
+				}
+				w(". 표본마다 `rb`에도 쓰기 부하(평균 %.0f tps)", sum/float64(len(m.loadTPS)))
+			}
 			w("\n")
+		}
+		if cp := c.copies; len(cp.backupStart) > 0 {
+			w("- main 복사의 내역(브랜치 생성 %d회, 워밍업 포함, main과 에이전트의 로그에서): 백업 시작(즉시 체크포인트) P50 %s·P95 %s, 그 체크포인트가 쓴 버퍼 P50 %d개(%s), 쓰기 단계 P50 %s·P95 %s, sync 단계 P50 %s·P95 %s; 에이전트의 복사 전체(백업 시작·reflink 복제·백업 종료·pg_wal) P50 %s·P95 %s\n",
+				len(cp.backupStart), seconds(percentile(cp.backupStart, 50)), seconds(percentile(cp.backupStart, 95)),
+				intPercentile(cp.ckptBuffers, 50), bytesShort(int64(intPercentile(cp.ckptBuffers, 50))*8192),
+				seconds(percentile(cp.ckptWrite, 50)), seconds(percentile(cp.ckptWrite, 95)),
+				seconds(percentile(cp.ckptSync, 50)), seconds(percentile(cp.ckptSync, 95)),
+				seconds(percentile(cp.agentCopy, 50)), seconds(percentile(cp.agentCopy, 95)))
 		}
 		w("- 측정 프로젝트 `perf`의 FailedScheduling(자리가 없어 Pending) 이벤트: %d건\n", c.pending)
 		if c.load.reports > 0 || c.load.command != "" {
@@ -184,23 +213,31 @@ func writeDoc(path string, r *results) error {
 	w("- 브랜치 생성: `POST .../branches`가 201(데이터 준비 끝, 5초 안)을 줄 때까지. 202는 5초 안에 데이터가 준비되지 않은 것이다. 같은 부모의 백업 모드 복사 사이 최소 간격(`minCopyInterval`, 스펙 7.2) %s에 0.5초를 더해 기다린 뒤 만든다. 간격 제한에 걸린 시간을 재지 않으려는 것이다. 롤백 전의 복구 지점(`rb`의 복사)도 같은 간격을 둔다.\n", r.copyInterval)
 	w("- 첫 쿼리: 201을 받은 때부터 새 port-forward → 접속 → `SELECT 1`이 성공할 때까지, 100ms마다 다시 시도한다. port-forward 준비 시간이 들어 있고, 보조 수치에 따로 적는다. 실제 클라이언트는 클러스터 안에서 Service로 바로 붙으므로 이 몫이 없다.\n")
 	w("- 롤백: `rb`(main의 복사본, pgbench 데이터 %s)에 복구 지점을 만들고 곧바로 `POST .../rollback`이 200을 줄 때까지. 매번 롤백이 만든 백업 브랜치(정지 상태지만 파드가 노드 자리를 차지한다)와 복구 지점을 지우고, 백업 브랜치가 사라질 때까지 기다린다.\n", bytesString(r.data.bytes))
-	w("- 정지 → 실행: `rb`를 `POST .../stop`(200, Stopped) 뒤 `POST .../start`가 200(Running)을 줄 때까지.\n")
+	w("- 정지 → 실행: `rb`를 `POST .../stop`(200, Stopped) 뒤 `POST .../start`가 200(Running)을 줄 때까지. 정지 시간도 보조로 적는다.\n")
+	w("- 롤백 요청 → rb Running(보조): 롤백 요청을 보낸 때부터 API가 `rb`를 Running으로 보일 때까지, 250ms마다 조회.\n")
+	w("- 쓰기 부하 조건의 롤백과 정지 → 실행은 main의 부하에 더해 `rb` 자신에도 `pgbench -c 4 -N`을 같은 방법으로 돌린다. 표본마다 부하를 시작해 `pg_stat_activity`에 활성 세션이 보인 뒤 %s 더 쓰고서 잰다(복구 지점도 그동안 만든다). 롤백과 정지가 `rb`의 PostgreSQL을 내리므로 부하는 표본마다 끝나고 다음 표본에서 다시 시작한다. 정지는 부하가 더럽힌 버퍼의 종료 체크포인트를 치른다.\n", rbLoadHold)
 	w("- 프로젝트 생성: `POST /v1/projects`부터 phase Ready까지(init-main 포함), 200ms마다 조회. 매번 지우고 네임스페이스가 사라질 때까지 기다린다.\n")
 	w("- 측정한 브랜치는 다음 측정 전에 지우고 사라질 때까지 기다린다. 노드(아래)에 브랜치 파드(500m·1Gi)가 20개 들어가지 않기 때문이다. 두 조건은 차례로 돈다.\n")
 	w("- 백분위는 최근접 순위다(20회면 P50은 10번째, P95는 19번째).\n")
 	w("- 쓰기 부하: main에 `pgbench -i -s %d`(%s 걸림, 데이터베이스 %s) 뒤, 쓰기 부하 조건 내내 main에서 `pgbench -c 4 -N`. ", r.scale, r.data.initTime.Round(time.Second), bytesString(r.data.bytes))
-	w("pgbench는 **main 파드의 postgres 컨테이너 안에서 `kubectl exec`로** 파드의 Unix 소켓에 붙어 돈다. 프로젝트의 `branch-ingress` 정책은 5432를 `consonance-system`과 볼륨 에이전트 라벨(`app.kubernetes.io/component`)의 파드에만 연다. 그 라벨을 단 파드는 에이전트 Service의 엔드포인트가 되어 에이전트로 가는 요청을 받게 되므로 쓸 수 없고, 측정 때문에 제품의 네트워크 정책을 넓히지 않는다. 그래서 부하를 만드는 클라이언트가 main의 CPU 한도(%s)를 PostgreSQL과 나눠 쓴다. 비밀번호는 E2E처럼 API(`GET .../connection`)에서 받아 exec의 표준 입력으로 넘기고 어디에도 찍지 않는다.\n\n", r.env.branchCPU)
+	w("pgbench는 **main 파드의 postgres 컨테이너 안에서 `kubectl exec`로** 파드의 Unix 소켓에 붙어 돈다. 프로젝트의 `branch-ingress` 정책은 5432를 `consonance-system`과 볼륨 에이전트 라벨(`app.kubernetes.io/component`)의 파드에만 연다. 그 라벨을 단 파드는 에이전트 Service의 엔드포인트가 되어 에이전트로 가는 요청을 받게 되므로 쓸 수 없고, 측정 때문에 제품의 네트워크 정책을 넓히지 않는다. 그래서 부하를 만드는 클라이언트가 부하를 받는 브랜치의 CPU 한도(브랜치 파드 %s)를 PostgreSQL과 나눠 쓴다. 비밀번호는 E2E처럼 API(`GET .../connection`)에서 받아 exec의 표준 입력으로 넘기고 어디에도 찍지 않는다. 클라이언트가 중단(`aborted`)되거나 0 tps인 5초 구간이 있으면 테스트가 실패한다.\n\n", r.env.branchResources)
+	causeSection(w, r)
 
 	w("## 측정 환경\n\n")
 	w("| 항목 | 값 |\n| --- | --- |\n")
 	w("| 호스트 | %s |\n", r.env.host)
-	w("| 머신 | Podman 머신 `podman-machine-default`(applehv, Fedora CoreOS), k3s는 그 안의 rootful 특권 컨테이너 `consonance-k3s` |\n")
+	w("| 호스트 상태(시작) | %s |\n", r.hostStart)
+	w("| 호스트 상태(끝) | %s |\n", r.hostEnd)
+	w("| 머신 | Podman 머신 %s, %s |\n", r.env.machine, r.env.machineOS)
+	w("| k3s 컨테이너 | %s |\n", r.env.k3sContainer)
 	w("| 노드 | `%s`, %s, CPU %s·메모리 %s(할당 가능 CPU %s·메모리 %s) |\n", r.env.node, r.env.arch, r.env.cpu, r.env.memory, r.env.allocCPU, r.env.allocMemory)
 	w("| 커널 | %s |\n", r.env.kernel)
 	w("| k3s | %s, %s |\n", r.env.k3s, r.env.runtime)
-	w("| 스토리지 | 클래스 `%s`(프로비저너 `%s`), 볼륨 파일 시스템 %s(reflink=1, 머신의 `/var/lib/consonance/storage`, 머신 디스크는 Mac SSD 위 가상 디스크). local-path는 PVC 크기를 강제하지 않는다 |\n", r.env.storageClass, r.env.provisioner, r.env.fsType)
-	w("| 브랜치 파드 | 요청 = 한도 CPU %s·메모리 %s(프로젝트 기본값), 에이전트 요청 CPU 100m·메모리 128Mi, 한도 CPU 1·메모리 128Mi |\n", r.env.branchCPU, r.env.branchMemory)
-	w("| 이미지 | `consonance/postgres:17-dev`, `consonance/agent:dev`, `consonance/operator:dev`, `consonance/apiserver:dev`, 미리 노드에 넣어 둠(`imagePullPolicy: Never`/`IfNotPresent`) |\n\n")
+	w("| 스토리지 | 클래스 `%s`(프로비저너 `%s`), 볼륨 파일 시스템 %s(%s), 볼륨 경로 `%s`, 그 파일 시스템(마운트 지점·크기·남은 공간) %s |\n",
+		r.env.storageClass, r.env.provisioner, r.env.fsType, r.env.reflink, r.env.volumePath, r.env.volumeDisk)
+	w("| 브랜치 파드(main) | %s |\n", r.env.branchResources)
+	w("| 에이전트 파드 | %s |\n", r.env.agentResources)
+	w("| 이미지(이미지 (pull 정책)) | %s |\n\n", "`"+strings.Join(r.env.images, "`, `")+"`")
 
 	w("## 원자료(초, 워밍업 제외)\n\n")
 	for _, c := range r.conditions {
@@ -232,39 +269,45 @@ func statusString(s map[int]int) string {
 	return strings.Join(parts, ", ")
 }
 
-// hostInfo describes the Mac the machine runs on, as far as it tells.
-func hostInfo() string {
-	if runtime.GOOS != "darwin" {
-		return runtime.GOOS + "/" + runtime.GOARCH
+func intPercentile(v []int, p float64) int {
+	d := make([]time.Duration, len(v))
+	for i, x := range v {
+		d[i] = time.Duration(x)
 	}
-	out := func(args ...string) string {
-		b, err := exec.Command(args[0], args[1:]...).Output()
-		if err != nil {
-			return "?"
-		}
-		return strings.TrimSpace(string(b))
-	}
-	mem := out("sysctl", "-n", "hw.memsize")
-	var gib string
-	var n int64
-	if _, err := fmt.Sscan(mem, &n); err == nil {
-		gib = fmt.Sprintf("%d GiB", n>>30)
-	}
-	return fmt.Sprintf("macOS %s, %s, %s CPU, 메모리 %s", out("sw_vers", "-productVersion"),
-		out("sysctl", "-n", "machdep.cpu.brand_string"), out("sysctl", "-n", "hw.ncpu"), gib)
+	return int(percentile(d, p))
 }
 
-// gitCommit is the commit measured, marked when files outside the tests and this document
-// differ from it (then the images may not be what the commit builds).
-func gitCommit() string {
-	head, err := exec.Command("git", "rev-parse", "--short", "HEAD").Output()
-	if err != nil {
-		return "?"
+func bytesShort(n int64) string { return fmt.Sprintf("%.0fMB", float64(n)/(1<<20)) }
+
+// causeSection explains, when branch creation under write load misses its criterion, where the
+// time goes: this run's copy breakdown, and the bounded experiment of Task 11's fix round 1
+// (2026-10-26) on a project like perf, which the run itself does not repeat.
+func causeSection(w func(string, ...any), r *results) {
+	var failed *conditionResult
+	for _, c := range r.conditions {
+		if c.name != writeLoad || len(c.metrics) == 0 {
+			continue
+		}
+		if ok, applies := c.metrics[0].passed(); applies && !ok {
+			failed = c
+		}
 	}
-	commit := strings.TrimSpace(string(head))
-	changed, err := exec.Command("git", "status", "--porcelain", "--", "../..", ":!../../test", ":!../../docs", ":!../../Makefile").Output()
-	if err == nil && len(strings.TrimSpace(string(changed))) > 0 {
-		commit += " + 커밋하지 않은 변경"
+	if failed == nil {
+		return
 	}
-	return commit
+	cp := failed.copies
+	w("## 쓰기 부하에서 브랜치 생성이 기준을 넘는 까닭\n\n")
+	w("- 이 실행에서: 백업 모드 복사가 main에 거는 즉시 체크포인트(`pg_backup_start(fast := true)`, 스펙 2장 \"체크포인트 비용\")가 P50 %s 걸렸다. 그 체크포인트는 버퍼 P50 %d개를 썼고, 쓰기 단계가 P50 %s, sync 단계가 P50 %s다. 에이전트의 복사 전체는 P50 %s다. 부하 없음에서는 같은 체크포인트가 P50 %s다.\n",
+		seconds(percentile(cp.backupStart, 50)), intPercentile(cp.ckptBuffers, 50), seconds(percentile(cp.ckptWrite, 50)),
+		seconds(percentile(cp.ckptSync, 50)), seconds(percentile(cp.agentCopy, 50)), seconds(percentile(r.conditions[0].copies.backupStart, 50)))
+	w("- 체크포인트가 쓰는 버퍼는 직전 체크포인트 뒤에 부하가 더럽힌 페이지다. `-N`은 1GB `pgbench_accounts`의 임의 행을 고치므로 복사 사이(약 7초)에 1만~2만 개(100~200MB)가 더럽혀진다.\n")
+	w("- 시간은 쓰기 단계에서 든다. 2026-10-26의 제한된 실험(같은 크기의 프로젝트, main에 같은 부하, 설정마다 브랜치 생성 5회, main cgroup의 PSI와 `cpu.stat`)에서:\n")
+	w("  - 기본 설정: 쓰기 0.94~3.45초, sync 0.02~0.10초. 생성 한 번 사이에 main의 `io.pressure` 0.5~1.5초, CPU 스로틀링 0.2~1.8초, `memory.pressure` 10ms 이하.\n")
+	w("  - main을 CPU 2로 늘림(스로틀링 0): 쓰기 1.29~2.78초로 그대로, `io.pressure`는 0.6~1.6초로 늘어남. CPU 한도는 주된 원인이 아니다.\n")
+	w("  - `checkpoint_flush_after = 0`(쓰기 중 강제 writeback 끔): 쓰기 1.43~2.85초, sync가 0.37~1.10초로 늘어 합은 그대로. memcg의 더러운 페이지가 105~125MB에서 멈췄다 줄어든다. 1Gi 한도의 memcg에서 dirty 한계에 닿아 쓰기가 장치의 writeback 속도로 묶인다.\n")
+	w("  - `bgwriter_lru_maxpages = 1000`, `bgwriter_lru_multiplier = 10`, `bgwriter_delay = 10ms`: 체크포인트가 쓰는 버퍼가 거의 줄지 않고 생성 P50 2.44초.\n")
+	w("  - `checkpoint_timeout = 30s`: 버퍼는 반으로 줄지만 체크포인트가 겹쳐 생성 P50 3.96초, 202 두 번. 더 나쁘다.\n")
+	w("  - 머신 디스크: 8k `O_DIRECT` 쓰기 99MB/s, 1M `O_DIRECT` 996MB/s, 8k 버퍼 쓰기 + fsync(순차) 733MB/s. 체크포인트의 흩어진 8k 페이지는 작은 쓰기의 속도(동시 WAL fsync와 나눠 약 60~80MB/s)로 나간다.\n")
+	w("  - reflink 복제(`FICLONE`)는 원본 파일의 더러운 페이지를 먼저 내보내므로 부하 중 복제가 0.3~1.5초로 길어진다(부하 없음 0.1초 안팎).\n")
+	w("- 결론: 원인은 Podman 머신 가상 디스크의 작은 쓰기 속도이고, 복사마다 강제 체크포인트를 거는 설계(스펙 2장)가 그 비용을 생성 시간에 넣는다. 위의 설정은 어느 것도 P50을 1초 아래로 내리지 못해 채택하지 않았다. 제품 설정은 바꾸지 않았다.\n\n")
 }

@@ -10,7 +10,6 @@ package perf
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -101,11 +100,12 @@ const (
 // Every measured branch, every backup branch a rollback makes and every project measured is
 // deleted, and gone, before the next run, so that the node never holds more than it can run.
 func TestPerformance(t *testing.T) {
-	res := &results{started: time.Now(), runs: runs, scale: scale}
+	res := &results{started: time.Now(), runs: runs, scale: scale, hostStart: hostState()}
 	// Registered first, so it runs last: the document is written whatever happened, after the
 	// project is gone.
 	t.Cleanup(func() {
 		res.finished = time.Now()
+		res.hostEnd = hostState()
 		if err := writeDoc(docPath, res); err != nil {
 			t.Errorf("write %s: %v", docPath, err)
 		} else {
@@ -116,9 +116,8 @@ func TestPerformance(t *testing.T) {
 	c := e2eutil.API(t)
 	id := e2eutil.CreateProject(t, c, "perf")
 	ns := e2eutil.Namespace(id)
-	project := e2eutil.WaitProjectReady(t, c, id, 5*time.Minute)
-	res.env = environment(t, c, id, ns)
-	res.env.storageClass = project.Storage.StorageClassName
+	e2eutil.WaitProjectReady(t, c, id, 5*time.Minute)
+	res.env = environment(t, ns)
 
 	mainConn := e2eutil.GetConnection(t, c, id, "main")
 	res.data = initData(t, ns, mainConn.Password, scale)
@@ -137,13 +136,20 @@ func TestPerformance(t *testing.T) {
 		before := operatorMetrics(t)
 		var l *load
 		if cond == writeLoad {
-			l = startLoad(t, ns, mainConn.Password)
+			l = startLoad(t, ns, "br-main", mainConn.Password, 5)
+			t.Logf("pgbench write load running on %s/br-main", ns)
 		}
 		// One group after the other, and none after a failure: the document then shows how far
-		// the run got.
-		for _, group := range []func(string) []*metric{m.branches, m.rollbacks, m.starts, m.projects} {
-			if !t.Failed() {
-				cr.metrics = append(cr.metrics, group(cond)...)
+		// the run got. The copies of main are broken down from the logs right after their group.
+		groups := []func(string) []*metric{m.branches, m.rollbacks, m.starts, m.projects}
+		for gi, group := range groups {
+			if t.Failed() {
+				break
+			}
+			start := time.Now()
+			cr.metrics = append(cr.metrics, group(cond)...)
+			if gi == 0 {
+				cr.copies = copyBreakdown(t, ns, condPrefix[cond], start.Add(-time.Second))
 			}
 		}
 		if l != nil {
@@ -165,6 +171,15 @@ func TestPerformance(t *testing.T) {
 		}
 	}
 }
+
+// hostState is the Mac's load, the machine's 5-minute pressure stall averages (PSI some) and
+// how many other containers share the machine.
+func hostState() string {
+	return hostLoad() + "; 머신 PSI avg300 " + machinePressure() + "; 머신에서 도는 consonance 밖의 컨테이너 " + otherContainers() + "개"
+}
+
+// condPrefix names a condition in branch names and subtests.
+var condPrefix = map[string]string{noLoad: "nl", writeLoad: "wl"}
 
 // rollbackBranch is the branch with the data that is rolled back, stopped and started.
 const rollbackBranch = "rb"
@@ -213,7 +228,7 @@ func (m *measurer) each(name string, fn func(t *testing.T, i int)) bool {
 func (m *measurer) branches(cond string) []*metric {
 	create := &metric{name: "브랜치 생성 API(201까지)", stat: statP50, target: time.Second, statuses: map[int]int{}}
 	first := &metric{name: "새 브랜치 첫 쿼리(201 → SELECT 1)", stat: statP95, target: 3 * time.Second}
-	prefix := map[string]string{noLoad: "nl", writeLoad: "wl"}[cond]
+	prefix := condPrefix[cond]
 	m.each("branches-"+prefix, func(t *testing.T, i int) {
 		name := fmt.Sprintf("%s-%02d", prefix, i)
 		m.pace(m.lastMainCopy)
@@ -298,61 +313,87 @@ func (m *measurer) deleteBranch(t *testing.T, name string) {
 	e2eutil.WaitBranchGone(t, m.c, m.id, name, 3*time.Minute)
 }
 
-// rollbacks measures a rollback of rb (POST until 200) to a restore point taken just before.
-// The backup branch it makes and the restore point are deleted after each run.
+// rollbacks measures a rollback of rb (POST until 200) to a restore point taken just before,
+// and, recorded only, the time from the request until the API shows rb Running again (polled
+// every 250ms). Under the write condition rb itself is written by pgbench while the restore
+// point is taken and the rollback runs, besides main's load. The backup branch the rollback
+// makes and the restore point are deleted after each run.
 func (m *measurer) rollbacks(cond string) []*metric {
 	mt := &metric{name: fmt.Sprintf("롤백(200까지, pgbench -s %d)", scale), stat: statMax, target: 10 * time.Second}
-	m.each("rollbacks-"+map[string]string{noLoad: "nl", writeLoad: "wl"}[cond], func(t *testing.T, i int) {
+	running := &metric{name: "롤백 요청 → rb Running(보조)", stat: statP50}
+	m.each("rollbacks-"+condPrefix[cond], func(t *testing.T, i int) {
 		m.pace(m.lastRBCopy)
-		var rp e2eutil.RestorePoint
-		m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/restore-points",
-			map[string]any{"label": fmt.Sprintf("perf %d", i)}, &rp, http.StatusCreated)
-		m.lastRBCopy = time.Now()
-		t.Cleanup(func() {
-			r, err := m.c.Call(http.MethodDelete, e2eutil.BranchPath(m.id, rollbackBranch)+"/restore-points/"+rp.ID, nil)
-			if err != nil || (r.Status != http.StatusNoContent && r.Status != http.StatusOK && r.Status != http.StatusNotFound) {
-				t.Errorf("cleanup: delete restore point %s: %v %v", rp.ID, r, err)
-			}
-		})
+		sample := func() {
+			var rp e2eutil.RestorePoint
+			m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/restore-points",
+				map[string]any{"label": fmt.Sprintf("perf %d", i)}, &rp, http.StatusCreated)
+			m.lastRBCopy = time.Now()
+			t.Cleanup(func() {
+				r, err := m.c.Call(http.MethodDelete, e2eutil.BranchPath(m.id, rollbackBranch)+"/restore-points/"+rp.ID, nil)
+				if err != nil || (r.Status != http.StatusNoContent && r.Status != http.StatusOK && r.Status != http.StatusNotFound) {
+					t.Errorf("cleanup: delete restore point %s: %v %v", rp.ID, r, err)
+				}
+			})
 
-		var out e2eutil.RestoreResult
-		r := m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/rollback",
-			map[string]any{"restorePointId": rp.ID}, &out, http.StatusOK)
-		if out.BackupBranch == "" {
-			t.Fatalf("rollback answered without a backup branch: %s", r)
+			var out e2eutil.RestoreResult
+			sent := time.Now()
+			r := m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/rollback",
+				map[string]any{"restorePointId": rp.ID}, &out, http.StatusOK)
+			if out.BackupBranch == "" {
+				t.Fatalf("rollback answered without a backup branch: %s", r)
+			}
+			t.Cleanup(func() { m.deleteBranch(t, out.BackupBranch) })
+			e2eutil.WaitBranchPhase(t, m.c, m.id, rollbackBranch, "Running", 2*time.Minute)
+			back := time.Since(sent)
+			t.Logf("rollback to %s: %d in %s, Running after %s, backup %s", rp.ID, r.Status,
+				r.Elapsed.Round(time.Millisecond), back.Round(time.Millisecond), out.BackupBranch)
+			mt.add(i, r.Elapsed)
+			running.add(i, back)
 		}
-		t.Cleanup(func() { m.deleteBranch(t, out.BackupBranch) })
-		t.Logf("rollback to %s: %d in %s, backup %s", rp.ID, r.Status, r.Elapsed.Round(time.Millisecond), out.BackupBranch)
-		mt.add(i, r.Elapsed)
-		e2eutil.WaitBranchPhase(t, m.c, m.id, rollbackBranch, "Running", 2*time.Minute)
+		if cond == writeLoad {
+			mt.addLoad(i, m.underLoad(t, sample))
+		} else {
+			sample()
+		}
 	})
-	return []*metric{mt}
+	return []*metric{mt, running}
 }
 
-// starts measures starting rb after it was stopped (POST start until 200).
+// starts measures starting rb after it was stopped (POST start until 200) and, recorded only,
+// the stop (POST stop until 200). Under the write condition rb is written by pgbench until the
+// stop, which then pays for a shutdown checkpoint of what the load dirtied.
 func (m *measurer) starts(cond string) []*metric {
 	mt := &metric{name: "정지 → 실행(기동 200까지)", stat: statP50, target: time.Second}
-	m.each("starts-"+map[string]string{noLoad: "nl", writeLoad: "wl"}[cond], func(t *testing.T, i int) {
-		var b e2eutil.Branch
-		m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/stop", nil, &b, http.StatusOK)
-		if b.Phase != "Stopped" {
-			t.Fatalf("stop answered phase %s", b.Phase)
+	stop := &metric{name: "정지(200까지, 보조)", stat: statP50}
+	m.each("starts-"+condPrefix[cond], func(t *testing.T, i int) {
+		sample := func() {
+			var b e2eutil.Branch
+			r := m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/stop", nil, &b, http.StatusOK)
+			if b.Phase != "Stopped" {
+				t.Fatalf("stop answered phase %s", b.Phase)
+			}
+			stop.add(i, r.Elapsed)
+			r = m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/start", nil, &b, http.StatusOK)
+			if b.Phase != "Running" {
+				t.Fatalf("start answered phase %s", b.Phase)
+			}
+			t.Logf("stop: %s, start: %d in %s", stop.last().Round(time.Millisecond), r.Status, r.Elapsed.Round(time.Millisecond))
+			mt.add(i, r.Elapsed)
 		}
-		r := m.c.Expect(t, http.MethodPost, e2eutil.BranchPath(m.id, rollbackBranch)+"/start", nil, &b, http.StatusOK)
-		if b.Phase != "Running" {
-			t.Fatalf("start answered phase %s", b.Phase)
+		if cond == writeLoad {
+			mt.addLoad(i, m.underLoad(t, sample))
+		} else {
+			sample()
 		}
-		t.Logf("start: %d in %s", r.Status, r.Elapsed.Round(time.Millisecond))
-		mt.add(i, r.Elapsed)
 	})
-	return []*metric{mt}
+	return []*metric{mt, stop}
 }
 
 // projects measures a project from POST until Ready (init-main included), then deletes it and
 // waits until its namespace is gone. There is no criterion (spec 15.3).
 func (m *measurer) projects(cond string) []*metric {
 	mt := &metric{name: "프로젝트 생성(요청 → Ready)", stat: statP50}
-	prefix := map[string]string{noLoad: "nl", writeLoad: "wl"}[cond]
+	prefix := condPrefix[cond]
 	m.each("projects-"+prefix, func(t *testing.T, i int) {
 		start := time.Now()
 		id := e2eutil.CreateProject(t, m.c, fmt.Sprintf("perf-%s-%02d", prefix, i))
@@ -405,20 +446,4 @@ func failedScheduling(t *testing.T, ns string) int {
 		n += max(c, 1)
 	}
 	return n
-}
-
-// projectCompute reads the project's default compute, which every branch here runs with.
-func projectCompute(t *testing.T, c *e2eutil.Client, id string) (cpu, memory string) {
-	t.Helper()
-	var p struct {
-		DefaultCompute struct {
-			CPU    string `json:"cpu"`
-			Memory string `json:"memory"`
-		} `json:"defaultCompute"`
-	}
-	r := c.Expect(t, http.MethodGet, e2eutil.ProjectPath(id), nil, nil, http.StatusOK)
-	if err := json.Unmarshal(r.Body, &p); err != nil {
-		t.Fatalf("decode project: %v", err)
-	}
-	return p.DefaultCompute.CPU, p.DefaultCompute.Memory
 }

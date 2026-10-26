@@ -14,24 +14,29 @@ import (
 	"consonance/test/internal/e2eutil"
 )
 
-// pgbench runs in main's postgres container with kubectl exec. The project's branch-ingress
-// policy lets PostgreSQL be reached only from consonance-system and from pods labelled as the
-// volume agent, and a pod with that label would also join the agent's Service and take its
-// traffic; the measurement does not widen the product's policy (spec 8) to make room for a
-// client pod. So pgbench runs next to the server it loads, over the pod's Unix socket, and
-// shares main's CPU limit.
+// pgbench runs in the loaded branch's postgres container with kubectl exec. The project's
+// branch-ingress policy lets PostgreSQL be reached only from consonance-system and from pods
+// labelled as the volume agent, and a pod with that label would also join the agent's Service
+// and take its traffic; the measurement does not widen the product's policy (spec 8) to make
+// room for a client pod. So pgbench runs next to the server it loads, over the pod's Unix
+// socket, and shares the branch's CPU limit.
 //
 // The password comes from the API (GET .../connection, as the E2E gets it) and goes to the
 // container on stdin, never on a command line or in the output.
 const pgbenchShell = `IFS= read -r PGPASSWORD && export PGPASSWORD && `
 
-// pgbenchArgs are the connection arguments: the tenant role over the pod's socket.
+// pgbenchConn are the connection arguments: the tenant role over the pod's socket.
 const pgbenchConn = `-h /var/run/postgresql -U app_owner -d app`
 
-// mainExec runs script with sh in main's postgres container, the password on its stdin.
-func mainExec(ctx context.Context, ns, password, script string) (string, error) {
-	return e2eutil.KubectlInput(ctx, []byte(password+"\n"), "-n", ns, "exec", "-i", "br-main", "-c", "postgres", "--",
+// podExec runs script with sh in a branch pod's postgres container, the password on its stdin.
+func podExec(ctx context.Context, ns, pod, password, script string) (string, error) {
+	return e2eutil.KubectlInput(ctx, []byte(password+"\n"), "-n", ns, "exec", "-i", pod, "-c", "postgres", "--",
 		"sh", "-c", pgbenchShell+script)
+}
+
+// mainExec is podExec on main.
+func mainExec(ctx context.Context, ns, password, script string) (string, error) {
+	return podExec(ctx, ns, "br-main", password, script)
 }
 
 // dataResult is the data the rollbacks carry.
@@ -61,24 +66,24 @@ func initData(t *testing.T, ns, password string, scale int) dataResult {
 	return res
 }
 
-// pgbenchPIDFile is where the load's pgbench writes its process ID, in main's socket directory
+// pgbenchPIDFile is where a load's pgbench writes its process ID, in the pod's socket directory
 // (an emptyDir), so that stop can end it.
 const pgbenchPIDFile = "/var/run/postgresql/perf-pgbench.pid"
 
-// loadCap is pgbench's -T: the write condition ends it sooner (stop), and the cap ends it should
-// the test die without its cleanups. Deleting the project ends it too.
+// loadCap is pgbench's -T: the write condition ends it sooner, and the cap ends it should the
+// test die without its cleanups. Deleting the project ends it too.
 const loadCap = 2 * time.Hour
 
-// load is pgbench's write load on main: 4 clients, -N (no updates of the small tables, so the
-// clients do not queue on their rows).
+// load is pgbench's write load on one branch: 4 clients, -N (no updates of the small tables,
+// so the clients do not queue on their rows).
 type load struct {
-	ns, password string
-	started      time.Time
-	done         chan struct{}
-	out          string
-	err          error
-	stopped      bool
-	cancel       context.CancelFunc
+	ns, pod, password string
+	started           time.Time
+	done              chan struct{}
+	out               string
+	err               error
+	ended             bool
+	cancel            context.CancelFunc
 }
 
 // loadResult is what the document reports of the load.
@@ -91,33 +96,38 @@ type loadResult struct {
 
 var progressLine = regexp.MustCompile(`progress: [0-9.]+ s, ([0-9.]+) tps`)
 
-// startLoad starts the load and returns once pgbench reports progress, so that every
-// measurement of the condition runs under it.
-func startLoad(t *testing.T, ns, password string) *load {
+// loadCommand is the pgbench run; progress every interval seconds.
+func loadCommand(interval int) string {
+	return fmt.Sprintf("pgbench -c 4 -T %d -N -P %d", int(loadCap.Seconds()), interval)
+}
+
+// startLoad starts pgbench on pod and returns once its clients are active in pg_stat_activity,
+// so that what is measured next runs under the load.
+func startLoad(t *testing.T, ns, pod, password string, progress int) *load {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &load{ns: ns, password: password, started: time.Now(), done: make(chan struct{}), cancel: cancel}
-	script := fmt.Sprintf("echo $$ > %s && exec pgbench %s -c 4 -T %d -N -P 5 2>&1",
-		pgbenchPIDFile, pgbenchConn, int(loadCap.Seconds()))
+	l := &load{ns: ns, pod: pod, password: password, started: time.Now(), done: make(chan struct{}), cancel: cancel}
+	script := fmt.Sprintf("echo $$ > %s && exec %s %s 2>&1", pgbenchPIDFile, loadCommand(progress), pgbenchConn)
 	go func() {
 		defer close(l.done)
-		l.out, l.err = mainExec(ctx, ns, password, script)
+		l.out, l.err = podExec(ctx, ns, pod, password, script)
 	}()
 	t.Cleanup(func() {
-		if !l.stopped {
-			l.stop(t)
+		if !l.ended {
+			l.end()
 		}
 	})
-	// The exec's output arrives when it ends, so progress is read from a second exec: the
-	// first progress report means the clients run. pgbench vacuums first, which takes a few
-	// seconds at this scale.
-	e2eutil.Eventually(t, 2*time.Minute, time.Second, "pgbench running in "+ns+"/br-main", func() (bool, string) {
+	// The exec's output arrives when it ends, so whether the clients run is read from a second
+	// exec. pgbench vacuums the small tables first.
+	e2eutil.Eventually(t, 2*time.Minute, 500*time.Millisecond, "pgbench running in "+ns+"/"+pod, func() (bool, string) {
 		select {
 		case <-l.done:
-			t.Fatalf("pgbench ended before the measurements: %v\n%s", l.err, l.out)
+			t.Fatalf("pgbench on %s ended before the measurement: %v\n%s", pod, l.err, l.out)
 		default:
 		}
-		out, err := mainExec(context.Background(), ns, password,
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		out, err := podExec(ctx, ns, pod, password,
 			fmt.Sprintf(`exec psql %s -Atc "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pgbench' AND state <> 'idle'"`, pgbenchConn))
 		if err != nil {
 			return false, err.Error()
@@ -125,150 +135,91 @@ func startLoad(t *testing.T, ns, password string) *load {
 		n, _ := strconv.Atoi(strings.TrimSpace(out))
 		return n > 0, fmt.Sprintf("%s active pgbench sessions", strings.TrimSpace(out))
 	})
-	t.Logf("pgbench write load running on %s/br-main", ns)
 	return l
 }
 
-// stop ends pgbench with SIGINT and returns what it reported. A pgbench that ended before
-// stop fails the test: the condition's measurements were not all under load.
-func (l *load) stop(t *testing.T) loadResult {
-	l.stopped = true
-	res := loadResult{
-		command:  fmt.Sprintf("pgbench -c 4 -T %d -N -P 5 (조건이 끝나면 SIGINT로 멈춤)", int(loadCap.Seconds())),
-		duration: time.Since(l.started),
-	}
+// running tells whether pgbench has not ended yet.
+func (l *load) running() bool {
 	select {
 	case <-l.done:
-		t.Errorf("pgbench ended before the write condition did: %v\n%s", l.err, l.out)
+		return false
 	default:
+		return true
+	}
+}
+
+// end stops pgbench with SIGINT if it still runs and waits for it. A load on a branch that was
+// stopped or restarted has ended already: its clients lost their server.
+func (l *load) end() {
+	l.ended = true
+	if l.running() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		if _, err := mainExec(ctx, l.ns, l.password, fmt.Sprintf(`kill -INT "$(cat %s)"`, pgbenchPIDFile)); err != nil {
-			t.Errorf("stop pgbench: %v", err)
-		}
+		_, _ = podExec(ctx, l.ns, l.pod, l.password, fmt.Sprintf(`kill -INT "$(cat %s)" 2>/dev/null`, pgbenchPIDFile))
 		cancel()
 		select {
 		case <-l.done:
 		case <-time.After(time.Minute):
-			t.Errorf("pgbench did not end a minute after SIGINT")
 		}
 	}
 	l.cancel()
+}
+
+// progress is the mean tps of pgbench's progress reports and how many there were.
+func (l *load) progress() (tps float64, reports int, zero bool) {
 	var sum float64
 	for _, m := range progressLine.FindAllStringSubmatch(l.out, -1) {
-		v, err := strconv.ParseFloat(m[1], 64)
-		if err == nil {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
 			sum += v
-			res.reports++
+			reports++
+			zero = zero || v == 0
 		}
 	}
-	if res.reports > 0 {
-		res.tps = sum / float64(res.reports)
-	} else {
-		t.Errorf("pgbench printed no progress; output:\n%s", l.out)
+	if reports > 0 {
+		tps = sum / float64(reports)
+	}
+	return tps, reports, zero
+}
+
+// stop ends the condition's load on main and returns what it reported. It fails the test when
+// pgbench ended before the condition did, when a client aborted, or when a progress report
+// shows no transactions: then not every measurement ran under the load.
+func (l *load) stop(t *testing.T) loadResult {
+	early := !l.running()
+	l.end()
+	res := loadResult{command: loadCommand(5) + " (조건이 끝나면 SIGINT로 멈춤)", duration: time.Since(l.started)}
+	if early {
+		t.Errorf("pgbench on %s ended before the write condition did: %v\n%s", l.pod, l.err, l.out)
+	}
+	var zero bool
+	res.tps, res.reports, zero = l.progress()
+	switch {
+	case res.reports == 0:
+		t.Errorf("pgbench on %s printed no progress; output:\n%s", l.pod, l.out)
+	case strings.Contains(l.out, "aborted"):
+		t.Errorf("a pgbench client on %s aborted; output:\n%s", l.pod, l.out)
+	case zero:
+		t.Errorf("pgbench on %s reported a 5-second interval without transactions; output:\n%s", l.pod, l.out)
 	}
 	return res
 }
 
-// environment is where the measurements ran.
-type environmentInfo struct {
-	host, node, kernel, k3s, runtime, arch string
-	cpu, memory, allocCPU, allocMemory     string
-	storageClass, provisioner, fsType      string
-	branchCPU, branchMemory                string
-	commit                                 string
-}
+// rbLoadHold is how long rb is written before a sample, so that the sample meets dirty buffers
+// and a busy server, not only a pgbench that has just connected.
+const rbLoadHold = 5 * time.Second
 
-func environment(t *testing.T, c *e2eutil.Client, id, ns string) environmentInfo {
+// underLoad runs sample while pgbench writes rb, for the write condition's rollbacks and stops
+// and starts: the load starts, its clients are active, it runs rbLoadHold, then sample runs.
+// The sample stops or restarts rb's PostgreSQL, which ends the load; what is left of it is ended
+// after. It returns the mean tps pgbench reported.
+func (m *measurer) underLoad(t *testing.T, sample func()) float64 {
 	t.Helper()
-	var e environmentInfo
-	f := strings.Split(e2eutil.Kubectl(t, "get", "nodes", "-o",
-		`jsonpath={.items[0].metadata.name}|{.items[0].status.nodeInfo.kernelVersion}|{.items[0].status.nodeInfo.kubeletVersion}|{.items[0].status.nodeInfo.containerRuntimeVersion}|{.items[0].status.nodeInfo.architecture}|{.items[0].status.capacity.cpu}|{.items[0].status.capacity.memory}|{.items[0].status.allocatable.cpu}|{.items[0].status.allocatable.memory}`), "|")
-	if len(f) == 9 {
-		e.node, e.kernel, e.k3s, e.runtime, e.arch = f[0], f[1], f[2], f[3], f[4]
-		e.cpu, e.memory, e.allocCPU, e.allocMemory = f[5], f[6], f[7], f[8]
+	l := startLoad(t, m.ns, "br-"+rollbackBranch, m.conn.Password, 1)
+	time.Sleep(rbLoadHold)
+	if !l.running() {
+		t.Fatalf("pgbench on rb ended before the sample: %v\n%s", l.err, l.out)
 	}
-	e.provisioner = e2eutil.Kubectl(t, "get", "storageclass", "consonance-xfs", "-o", "jsonpath={.provisioner}")
-	e.fsType = e2eutil.Kubectl(t, "-n", ns, "exec", "volume-agent", "--", "stat", "-f", "-c", "%T", "/volume")
-	e.branchCPU, e.branchMemory = projectCompute(t, c, id)
-	e.host = hostInfo()
-	e.commit = gitCommit()
-	return e
-}
-
-// operatorSnapshot is the sums and counts of the operator's histograms (spec 11) at one moment.
-type operatorSnapshot map[string]float64
-
-// operatorHistograms are the series read; their means over a condition cross-check the client's
-// times, from the operator's side (they include the warm-ups and every event of the kind).
-var operatorHistograms = []string{
-	"consonance_branch_create_seconds",
-	"consonance_branch_first_ready_seconds",
-	`consonance_restore_seconds{kind="rollback",result="done"}`,
-	"consonance_start_seconds",
-	"consonance_project_create_seconds",
-}
-
-// operatorMetrics reads the operator's metrics through the API server's pod proxy.
-func operatorMetrics(t *testing.T) operatorSnapshot {
-	t.Helper()
-	snap := operatorSnapshot{}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	pod, err := e2eutil.KubectlContext(ctx, "-n", e2eutil.SystemNamespace, "get", "pods", "-l",
-		"app.kubernetes.io/name=consonance-operator", "--field-selector=status.phase=Running", "-o", "jsonpath={.items[0].metadata.name}")
-	if err != nil || pod == "" {
-		t.Logf("operator metrics: no operator pod: %v", err)
-		return snap
-	}
-	out, err := e2eutil.KubectlContext(ctx, "get", "--raw",
-		"/api/v1/namespaces/"+e2eutil.SystemNamespace+"/pods/"+pod+":8080/proxy/metrics")
-	if err != nil {
-		t.Logf("operator metrics: %v", err)
-		return snap
-	}
-	snap["pod:"+pod] = 1
-	for _, line := range strings.Split(out, "\n") {
-		for _, h := range operatorHistograms {
-			name, labels, _ := strings.Cut(h, "{")
-			if labels != "" {
-				labels = "{" + labels
-			}
-			for _, suffix := range []string{"_sum", "_count"} {
-				prefix := name + suffix + labels + " "
-				if strings.HasPrefix(line, prefix) {
-					if v, err := strconv.ParseFloat(strings.TrimPrefix(line, prefix), 64); err == nil {
-						snap[h+suffix] = v
-					}
-				}
-			}
-		}
-	}
-	return snap
-}
-
-// operatorMean is a histogram's mean over a condition and how many it saw.
-type operatorMean struct {
-	name  string
-	count int
-	mean  time.Duration
-}
-
-// since is the mean of each histogram between before and s; nothing when the operator was
-// restarted in between (its histograms began again).
-func (s operatorSnapshot) since(before operatorSnapshot) []operatorMean {
-	var out []operatorMean
-	for k := range s {
-		if strings.HasPrefix(k, "pod:") && before[k] == 0 {
-			return nil
-		}
-	}
-	for _, h := range operatorHistograms {
-		n := s[h+"_count"] - before[h+"_count"]
-		if n <= 0 {
-			continue
-		}
-		sum := s[h+"_sum"] - before[h+"_sum"]
-		out = append(out, operatorMean{name: h, count: int(n), mean: time.Duration(sum / n * float64(time.Second))})
-	}
-	return out
+	sample()
+	l.end()
+	tps, _, _ := l.progress()
+	return tps
 }
