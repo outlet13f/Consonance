@@ -1,4 +1,4 @@
-.PHONY: test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent generate envtest test-envtest
+.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent generate envtest test-envtest
 
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0
 SETUP_ENVTEST = go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
@@ -39,3 +39,12 @@ image-agent: ## build consonance/agent:dev for the local architecture
 
 smoke-agent: image-agent ## run the agent image smoke test
 	test/image/agent-smoke.sh
+
+dev-cluster: ## k3s on the Podman machine with StorageClass consonance-xfs; kubeconfig in bin/dev/kubeconfig
+	hack/dev-cluster.sh up
+
+dev-cluster-down: ## remove the dev cluster container (volumes stay; hack/dev-cluster.sh down --purge deletes them)
+	hack/dev-cluster.sh down
+
+dev-cluster-check: ## prove consonance-xfs volumes are on XFS with reflink
+	hack/dev-cluster.sh check

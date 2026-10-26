@@ -1,0 +1,10 @@
+# Served by the local-path provisioner bundled with k3s. The dev cluster starts k3s with
+# --default-local-storage-path /var/lib/consonance/storage, which is on the Podman machine's
+# XFS (reflink=1), so the branching engine can clone volumes with reflink copies.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: consonance-xfs
+provisioner: rancher.io/local-path
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
