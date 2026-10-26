@@ -1,6 +1,7 @@
-# One replica without leader election: a single dev operator needs no lease (the Role in
-# config/rbac/role.yaml already allows --leader-elect for later). Images are loaded into the
-# cluster by `make load-images`, so they are never pulled.
+# One replica. Recreate plus leader election: during a rollout the old pod stops before the new
+# one starts, and if two ever overlapped (a slow termination) only the lease holder reconciles.
+# The lease Role is in config/rbac/role.yaml. Images are loaded into the cluster by
+# `make load-images`, so they are never pulled.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,6 +11,8 @@ metadata:
     app.kubernetes.io/name: consonance-operator
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: consonance-operator
@@ -31,6 +34,11 @@ spec:
         args:
         - --agent-image=consonance/agent:dev
         - --postgres-image=consonance/postgres:17-dev
+        - --leader-elect
+        env:
+        # Keeps the Go heap under the 128Mi limit so the GC works before the OOM killer does.
+        - name: GOMEMLIMIT
+          value: 100MiB
         ports:
         - name: metrics
           containerPort: 8080

@@ -35,6 +35,13 @@ spec:
         - name: http
           containerPort: 8080
         # GET /healthz needs no key.
+        # The listener opens only after the cache has synced (up to about 30s).
+        startupProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          failureThreshold: 12
         livenessProbe:
           httpGet:
             path: /healthz
