@@ -46,6 +46,80 @@ type BranchReconciler struct {
 	mu         sync.Mutex
 	notBefore  map[client.ObjectKey]time.Time     // a rate-limited branch is not tried again before this
 	unanswered map[client.ObjectKey]time.Duration // a branch whose supervisor does not answer: the last wait
+
+	// timed holds, for a branch whose timings are not all recorded yet, which of them the API
+	// server has: a metric is observed when its timing first reaches the API server, not before
+	// (a status update that conflicts is made again) and not again after.
+	timed map[client.ObjectKey]timedStatus
+	// startedAt is when the operator asked a stopped branch to start, until it sees it run. It
+	// is lost with the operator, and that start is then not timed.
+	startedAt map[client.ObjectKey]time.Time
+}
+
+// timedStatus says which timings of a branch are recorded.
+type timedStatus struct{ dataReady, running bool }
+
+// startingSince notes the first request to start a stopped branch.
+func (r *BranchReconciler) startingSince(key client.ObjectKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.startedAt == nil {
+		r.startedAt = map[client.ObjectKey]time.Time{}
+	}
+	if _, ok := r.startedAt[key]; !ok {
+		r.startedAt[key] = r.now()
+	}
+}
+
+// startEnded drops the note of a start; if the branch runs, the start's time is observed.
+func (r *BranchReconciler) startEnded(key client.ObjectKey, running bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if at, ok := r.startedAt[key]; ok && running {
+		observe(startSeconds, r.now().Sub(at))
+	}
+	delete(r.startedAt, key)
+}
+
+// recorded notes which of a branch's timings the API server has, as just read.
+func (r *BranchReconciler) recorded(b *v1alpha1.Branch) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t := b.Status.Timings
+	key := client.ObjectKeyFromObject(b)
+	if t.DataReadyAt != nil && t.RunningAt != nil {
+		delete(r.timed, key)
+		return
+	}
+	if r.timed == nil {
+		r.timed = map[client.ObjectKey]timedStatus{}
+	}
+	r.timed[key] = timedStatus{dataReady: t.DataReadyAt != nil, running: t.RunningAt != nil}
+}
+
+// saved observes the timings that b's status, which the API server now has, records for the first
+// time (spec 11). main's data time is left out: its init-main belongs to the project's creation.
+func (r *BranchReconciler) saved(b *v1alpha1.Branch) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := client.ObjectKeyFromObject(b)
+	was, ok := r.timed[key]
+	if !ok {
+		return // everything was recorded already
+	}
+	t := b.Status.Timings
+	created := b.CreationTimestamp.Time
+	if t.DataReadyAt != nil && !was.dataReady {
+		was.dataReady = true
+		if !isMain(b) {
+			observe(branchCreateSeconds, t.DataReadyAt.Sub(created))
+		}
+	}
+	if t.RunningAt != nil && !was.running {
+		was.running = true
+		observe(branchFirstReadySeconds, t.RunningAt.Sub(created))
+	}
+	r.timed[key] = was
 }
 
 // holdOff keeps a branch from being tried again for d: a rate limit's Retry-After is honored
@@ -101,6 +175,8 @@ func (r *BranchReconciler) forget(key client.ObjectKey) {
 	defer r.mu.Unlock()
 	delete(r.notBefore, key)
 	delete(r.unanswered, key)
+	delete(r.timed, key)
+	delete(r.startedAt, key)
 }
 
 func (r *BranchReconciler) now() time.Time {
@@ -179,6 +255,7 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
+	r.recorded(&b)
 	before := b.Status.DeepCopy()
 	res, err := r.reconcile(ctx, &p, &b, token)
 	b.Status.ObservedGeneration = b.Generation
@@ -189,6 +266,7 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 			}
 			return ctrl.Result{}, errors.Join(err, uerr)
 		}
+		r.saved(&b)
 	}
 	return res, err
 }
@@ -201,6 +279,7 @@ func (r *BranchReconciler) saveStatus(ctx context.Context, b *v1alpha1.Branch) e
 		return err
 	}
 	b.ResourceVersion = c.ResourceVersion
+	r.saved(b)
 	return nil
 }
 
@@ -275,6 +354,7 @@ func (r *BranchReconciler) ensureData(ctx context.Context, b *v1alpha1.Branch, a
 			return agent.CreateBranchData(ctx, b.Name, req)
 		})
 		if err != nil {
+			countCopyError(err)
 			return r.dataFailed(b, err, v1alpha1.ReasonCopyFailed)
 		}
 		gen = d.Generation
@@ -413,6 +493,9 @@ func (r *BranchReconciler) ensureState(ctx context.Context, b *v1alpha1.Branch, 
 		b.Status.Phase = v1alpha1.BranchStopping
 		return ctrl.Result{RequeueAfter: waitPoll}, nil
 	}
+	if b.Status.Phase == v1alpha1.BranchStopped { // asked to run again: this is a start, not the first
+		r.startingSince(key)
+	}
 	b.Status.Phase = v1alpha1.BranchStarting
 	st, err = call(ctx, startTimeout, sup.Start)
 	switch {
@@ -437,6 +520,7 @@ func (r *BranchReconciler) settled(b *v1alpha1.Branch, phase v1alpha1.BranchPhas
 	if phase == v1alpha1.BranchRunning && b.Status.Timings.RunningAt == nil {
 		b.Status.Timings.RunningAt = &metav1.Time{Time: r.now()}
 	}
+	r.startEnded(client.ObjectKeyFromObject(b), phase == v1alpha1.BranchRunning)
 }
 
 // parseGeneration reads a supervisor's generation, "data-N".

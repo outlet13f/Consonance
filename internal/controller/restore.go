@@ -67,6 +67,7 @@ func (r *BranchReconciler) restore(ctx context.Context, b *v1alpha1.Branch, agen
 		}
 		if restoreFinished(lr.Phase) {
 			logf.FromContext(ctx).Info("restore finished", "phase", lr.Phase, "message", lr.Message)
+			observeRestore(lr)
 			return ctrl.Result{}, nil
 		}
 		next, res, err := steps[lr.Phase](ctx, b, agent, sup)
@@ -110,6 +111,7 @@ func (r *BranchReconciler) restorePrepare(ctx context.Context, b *v1alpha1.Branc
 			return agent.CreateGeneration(ctx, b.Name, req)
 		})
 		if err != nil {
+			countCopyError(err)
 			if permanentReason(err) != "" || agentCode(err) == agentapi.CodeNotFound {
 				r.restoreFailed(b, err.Error())
 				return true, ctrl.Result{}, nil

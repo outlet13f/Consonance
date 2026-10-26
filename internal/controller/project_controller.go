@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -62,6 +63,45 @@ type ProjectReconciler struct {
 	Scheme     *runtime.Scheme
 	Connector  Connector
 	AgentImage string
+
+	mu    sync.Mutex
+	ready map[client.ObjectKey]bool // projects that were Ready already, or whose first Ready is observed
+}
+
+// readyAlready notes a project the API server shows Ready: its first Ready was before this look,
+// perhaps before the operator's restart, and is not observed.
+func (r *ProjectReconciler) readyAlready(p *v1alpha1.Project) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ready == nil {
+		r.ready = map[client.ObjectKey]bool{}
+	}
+	r.ready[client.ObjectKeyFromObject(p)] = true
+}
+
+// becameReady observes the time a project took to its first Ready, once its Ready status is
+// saved. A project that turns Ready again after a hiccup is not observed again. Nothing in the
+// status says whether a project was Ready before, so this is kept in memory; a project that is
+// not Ready when the operator starts, and was before, is observed once more.
+func (r *ProjectReconciler) becameReady(p *v1alpha1.Project) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := client.ObjectKeyFromObject(p)
+	if r.ready[key] {
+		return
+	}
+	if r.ready == nil {
+		r.ready = map[client.ObjectKey]bool{}
+	}
+	r.ready[key] = true
+	observe(projectCreateSeconds, time.Since(p.CreationTimestamp.Time))
+}
+
+// forget drops a deleted project.
+func (r *ProjectReconciler) forget(key client.ObjectKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.ready, key)
 }
 
 // SetupWithManager registers the reconciler. A project is looked at again when its spec changes
@@ -94,6 +134,9 @@ func projectOf(_ context.Context, o client.Object) []reconcile.Request {
 func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var p v1alpha1.Project
 	if err := r.Get(ctx, req.NamespacedName, &p); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.forget(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !p.DeletionTimestamp.IsZero() {
@@ -102,6 +145,9 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	id, _ := ProjectID(p.Namespace)
 	ctx = logf.IntoContext(ctx, logf.FromContext(ctx).WithValues("projectId", id))
 
+	if p.Status.Phase == v1alpha1.ProjectReady {
+		r.readyAlready(&p)
+	}
 	before := p.Status.DeepCopy()
 	res, err := r.reconcile(ctx, &p)
 	p.Status.ObservedGeneration = p.Generation
@@ -112,6 +158,9 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 				return res, err // a newer version exists, and its update event brings the project back
 			}
 			return ctrl.Result{}, errors.Join(err, uerr)
+		}
+		if p.Status.Phase == v1alpha1.ProjectReady {
+			r.becameReady(&p)
 		}
 	}
 	return res, err
