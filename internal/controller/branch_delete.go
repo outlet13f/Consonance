@@ -27,7 +27,7 @@ func (r *BranchReconciler) finalize(ctx context.Context, b *v1alpha1.Branch) (ct
 	if b.Status.Phase != v1alpha1.BranchDeleting {
 		b.Status.Phase = v1alpha1.BranchDeleting
 		if err := r.Status().Update(ctx, b); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, r.gone(client.ObjectKeyFromObject(b), err)
 		}
 	}
 	key := client.ObjectKey{Namespace: b.Namespace, Name: BranchObjectName(b.Name)}
@@ -71,7 +71,7 @@ func (r *BranchReconciler) finalize(ctx context.Context, b *v1alpha1.Branch) (ct
 	}
 	controllerutil.RemoveFinalizer(b, BranchFinalizer)
 	if err := r.Update(ctx, b); err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, r.gone(client.ObjectKeyFromObject(b), err) // gone already: done
 	}
 	r.forget(client.ObjectKeyFromObject(b))
 	return ctrl.Result{}, nil
@@ -97,7 +97,9 @@ func (r *BranchReconciler) dataToDelete(ctx context.Context, b *v1alpha1.Branch)
 	if !p.DeletionTimestamp.IsZero() || !meta.IsStatusConditionTrue(p.Status.Conditions, v1alpha1.ConditionReflinkSupported) {
 		return false, nil
 	}
-	return true, nil
+	// The cache may still show the Project of a namespace being deleted, whose agent and token
+	// are gone already.
+	return !beingDeleted(ctx, r.Client, b.Namespace), nil
 }
 
 // keepMovedBackup makes the backup branch of a rollback that was moving the replaced data away

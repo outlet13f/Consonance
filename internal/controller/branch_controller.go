@@ -242,7 +242,7 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	if controllerutil.AddFinalizer(&b, BranchFinalizer) {
 		if err := r.Update(ctx, &b); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, r.gone(req.NamespacedName, err)
 		}
 	}
 	if d := r.heldOff(req.NamespacedName); d > 0 {
@@ -257,23 +257,42 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 	token, err := r.token(ctx, b.Namespace)
 	if err != nil {
+		if apierrors.IsNotFound(err) && beingDeleted(ctx, r.Client, b.Namespace) {
+			return ctrl.Result{}, nil // the namespace controller took it; the branch goes too
+		}
 		return ctrl.Result{}, err
 	}
 
 	r.recorded(&b)
 	before := b.Status.DeepCopy()
 	res, err := r.reconcile(ctx, &p, &b, token)
+	if namespaceTerminating(err) {
+		return ctrl.Result{}, nil // the project is being deleted: nothing it would make stays
+	}
 	b.Status.ObservedGeneration = b.Generation
 	if !equality.Semantic.DeepEqual(*before, b.Status) {
 		if uerr := r.Status().Update(ctx, &b); uerr != nil {
 			if apierrors.IsConflict(uerr) {
 				return res, err // a newer version exists, and its update event brings the branch back
 			}
+			if apierrors.IsNotFound(uerr) {
+				return ctrl.Result{}, r.gone(req.NamespacedName, uerr)
+			}
 			return ctrl.Result{}, errors.Join(err, uerr)
 		}
 		r.saved(&b)
 	}
 	return res, err
+}
+
+// gone turns the NotFound of a write to a branch that was deleted meanwhile into success, and
+// forgets the branch; any other error is returned as it is.
+func (r *BranchReconciler) gone(key client.ObjectKey, err error) error {
+	if apierrors.IsNotFound(err) {
+		r.forget(key)
+		return nil
+	}
+	return err
 }
 
 // saveStatus writes b's status now. It sends a copy, so b's status, and the pointers into it a

@@ -152,10 +152,17 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	before := p.Status.DeepCopy()
 	res, err := r.reconcile(ctx, &p)
+	if namespaceTerminating(err) {
+		return ctrl.Result{}, nil // the project is being deleted: nothing it would make stays
+	}
 	p.Status.ObservedGeneration = p.Generation
 	summarize(&p)
 	if !equality.Semantic.DeepEqual(*before, p.Status) {
 		if uerr := r.Status().Update(ctx, &p); uerr != nil {
+			if apierrors.IsNotFound(uerr) {
+				r.forget(req.NamespacedName)
+				return ctrl.Result{}, nil // deleted meanwhile: nothing is left to record
+			}
 			if apierrors.IsConflict(uerr) {
 				if err != nil {
 					return res, err // the error's own retry brings the project back
