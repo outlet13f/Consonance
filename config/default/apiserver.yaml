@@ -1,0 +1,87 @@
+# Two replicas. The distroless image has no shell, so the preStop is the built-in sleep action:
+# it keeps the pod serving while the Service endpoints are removed, before SIGTERM.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consonance-apiserver
+  namespace: consonance-system
+  labels:
+    app.kubernetes.io/name: consonance-apiserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: consonance-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: consonance-apiserver
+    spec:
+      serviceAccountName: consonance-apiserver
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: apiserver
+        image: consonance/apiserver:dev
+        imagePullPolicy: Never
+        args:
+        - --admin-key-file=/etc/consonance/admin/key
+        - --storage-class=consonance-xfs
+        - --listen-address=:8080
+        ports:
+        - name: http
+          containerPort: 8080
+        # GET /healthz needs no key.
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+        lifecycle:
+          preStop:
+            sleep:
+              seconds: 5
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - name: admin-key
+          mountPath: /etc/consonance/admin
+          readOnly: true
+      volumes:
+      - name: admin-key
+        secret:
+          secretName: consonance-admin-key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: consonance-apiserver
+  namespace: consonance-system
+  labels:
+    app.kubernetes.io/name: consonance-apiserver
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: consonance-apiserver
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http

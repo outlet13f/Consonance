@@ -1,0 +1,60 @@
+# One replica without leader election: a single dev operator needs no lease (the Role in
+# config/rbac/role.yaml already allows --leader-elect for later). Images are loaded into the
+# cluster by `make load-images`, so they are never pulled.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: consonance-operator
+  namespace: consonance-system
+  labels:
+    app.kubernetes.io/name: consonance-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: consonance-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: consonance-operator
+    spec:
+      serviceAccountName: consonance-operator
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: operator
+        image: consonance/operator:dev
+        imagePullPolicy: Never
+        args:
+        - --agent-image=consonance/agent:dev
+        - --postgres-image=consonance/postgres:17-dev
+        ports:
+        - name: metrics
+          containerPort: 8080
+        - name: probes
+          containerPort: 8081
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: probes
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: probes
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 128Mi
+        securityContext:
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+          seccompProfile:
+            type: RuntimeDefault

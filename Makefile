@@ -1,4 +1,4 @@
-.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent image-operator image-apiserver smoke-binaries load-images generate envtest test-envtest
+.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent image-operator image-apiserver smoke-binaries load-images deploy-dev undeploy-dev generate envtest test-envtest
 
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0
 SETUP_ENVTEST = go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
@@ -60,3 +60,9 @@ dev-cluster-down: ## remove the dev cluster container (volumes stay; hack/dev-cl
 
 dev-cluster-check: ## prove consonance-xfs volumes are on XFS with reflink
 	hack/dev-cluster.sh check
+
+deploy-dev: ## install CRDs, RBAC, the operator and the API server in the dev cluster (admin key in bin/dev/admin-key)
+	hack/deploy-dev.sh up
+
+undeploy-dev: ## remove the operator and the API server (CRDs, RBAC, namespace and key stay)
+	hack/deploy-dev.sh down

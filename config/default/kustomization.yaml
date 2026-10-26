@@ -1,0 +1,12 @@
+# Development install: `make deploy-dev` (hack/deploy-dev.sh). The admin key Secret
+# consonance-admin-key is not here; the script makes it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- namespace.yaml
+- ../crd
+- ../rbac
+- ../policy
+- rbac.yaml
+- operator.yaml
+- apiserver.yaml
