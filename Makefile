@@ -1,4 +1,4 @@
-.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent image-operator image-apiserver smoke-binaries load-images deploy-dev undeploy-dev generate envtest test-envtest e2e
+.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent image-operator image-apiserver smoke-binaries load-images deploy-dev undeploy-dev generate envtest test-envtest e2e perf
 
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0
 SETUP_ENVTEST = go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
@@ -69,3 +69,6 @@ undeploy-dev: ## remove the operator and the API server (CRDs, RBAC, namespace a
 
 e2e: ## end-to-end tests on the dev cluster (make dev-cluster images load-images deploy-dev first); fails without it
 	KUBECONFIG=$(CURDIR)/bin/dev/kubeconfig go test -tags e2e -count=1 -timeout 30m -v ./test/e2e/
+
+perf: ## spec 15 performance measurements on the dev cluster; writes docs/perf/2026-10-26-branching-engine.md
+	KUBECONFIG=$(CURDIR)/bin/dev/kubeconfig go test -tags perf -count=1 -timeout 2h -v ./test/perf/

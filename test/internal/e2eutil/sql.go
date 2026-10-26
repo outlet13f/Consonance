@@ -24,50 +24,70 @@ func ServiceOf(host string) (svc, ns string, err error) {
 
 // SQL connects to a branch as the tenant role of conn through a port-forward to the branch's
 // Service, retrying for a minute, and closes the connection when the test ends. Each try forwards
-// afresh: kubectl usually ends a forward whose connection inside the pod was refused, so a retry
-// over the old one would hit a dead forward. The forward targets the pod running now: after a
-// stop and start, a rollback or a reset, connect again.
+// afresh (Dial): kubectl usually ends a forward whose connection inside the pod was refused, so a
+// retry over the old one would hit a dead forward. The forward targets the pod running now: after
+// a stop and start, a rollback or a reset, connect again.
 func SQL(t testing.TB, conn Connection) *pgx.Conn {
 	t.Helper()
 	mustLoad(t)
-	svc, ns, err := ServiceOf(conn.Host)
-	if err != nil {
+	if _, _, err := ServiceOf(conn.Host); err != nil {
 		t.Fatal(err)
 	}
 
 	var (
-		db   *pgx.Conn
-		stop func()
+		db      *pgx.Conn
+		release func()
 	)
 	Eventually(t, time.Minute, time.Second, "connect to "+conn.Host, func() (bool, string) {
-		local, stopForward, err := startPortForward(ns, "svc/"+svc, conn.Port)
-		if err != nil {
-			return false, "port-forward: " + err.Error()
-		}
-		cfg, err := pgx.ParseConfig(fmt.Sprintf("host=127.0.0.1 port=%d sslmode=disable connect_timeout=10", local))
-		if err != nil {
-			stopForward()
-			t.Fatal(err)
-		}
-		cfg.User, cfg.Password, cfg.Database = conn.User, conn.Password, conn.Database
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		db, err = pgx.ConnectConfig(ctx, cfg)
+		var err error
+		db, release, _, err = Dial(ctx, conn)
 		if err != nil {
-			stopForward()
 			return false, err.Error()
 		}
-		stop = stopForward
 		return true, ""
 	})
-	// Cleanups run last first: the connection closes before its forward stops.
-	t.Cleanup(stop)
-	t.Cleanup(func() {
+	t.Cleanup(release)
+	return db
+}
+
+// Dial is one try of SQL: it forwards a fresh local port to the branch's Service, connects
+// through it as the tenant role of conn, and returns the connection, a release that ends the
+// connection and then the forward, and how long the forward took to listen. It neither retries
+// nor registers cleanups, so a caller can time a try and tell the forward's share of it from
+// PostgreSQL's (test/perf).
+func Dial(ctx context.Context, conn Connection) (db *pgx.Conn, release func(), forward time.Duration, err error) {
+	if err := load(); err != nil {
+		return nil, nil, 0, err
+	}
+	svc, ns, err := ServiceOf(conn.Host)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	start := time.Now()
+	local, stopForward, err := startPortForward(ns, "svc/"+svc, conn.Port)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("port-forward: %w", err)
+	}
+	forward = time.Since(start)
+	cfg, err := pgx.ParseConfig(fmt.Sprintf("host=127.0.0.1 port=%d sslmode=disable connect_timeout=10", local))
+	if err != nil {
+		stopForward()
+		return nil, nil, forward, err
+	}
+	cfg.User, cfg.Password, cfg.Database = conn.User, conn.Password, conn.Database
+	db, err = pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		stopForward()
+		return nil, nil, forward, err
+	}
+	return db, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = db.Close(ctx)
-	})
-	return db
+		stopForward()
+	}, forward, nil
 }
 
 // QueryStrings runs a query whose rows have one text column and returns them.
