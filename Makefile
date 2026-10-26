@@ -1,4 +1,4 @@
-.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent image-operator image-apiserver smoke-binaries load-images deploy-dev undeploy-dev generate envtest test-envtest
+.PHONY: dev-cluster dev-cluster-down dev-cluster-check test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent image-operator image-apiserver smoke-binaries load-images deploy-dev undeploy-dev generate envtest test-envtest e2e
 
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0
 SETUP_ENVTEST = go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
@@ -66,3 +66,6 @@ deploy-dev: ## install CRDs, RBAC, the operator and the API server in the dev cl
 
 undeploy-dev: ## remove the operator and the API server (CRDs, RBAC, namespace and key stay)
 	hack/deploy-dev.sh down
+
+e2e: ## end-to-end tests on the dev cluster (make dev-cluster images load-images deploy-dev first); fails without it
+	KUBECONFIG=$(CURDIR)/bin/dev/kubeconfig go test -tags e2e -count=1 -timeout 30m -v ./test/e2e/
