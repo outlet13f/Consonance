@@ -138,7 +138,7 @@ func writeDoc(path string, r *results) error {
 	if r.runs != 20 {
 		w(" (**스펙의 20회가 아닌 시험 실행**)")
 	}
-	w("\n- 코드: `%s`(이미지는 이 커밋에서 빌드해 `make images load-images deploy-dev`로 올림)\n\n", r.env.commit)
+	w("\n- 측정한 코드: `%s`(저장소 HEAD. 이미지는 `make images load-images deploy-dev`로 올렸고, 이 문서는 이미지가 어느 커밋에서 빌드됐는지 확인하지 않는다)\n\n", r.env.commit)
 
 	w("## 결과\n\n")
 	w("| 조건 | 지표 | 횟수 | P50 | P95 | 최대 | 기준 | 통과 |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n")
@@ -300,14 +300,24 @@ func causeSection(w func(string, ...any), r *results) {
 	w("- 이 실행에서: 백업 모드 복사가 main에 거는 즉시 체크포인트(`pg_backup_start(fast := true)`, 스펙 2장 \"체크포인트 비용\")가 P50 %s 걸렸다. 그 체크포인트는 버퍼 P50 %d개를 썼고, 쓰기 단계가 P50 %s, sync 단계가 P50 %s다. 에이전트의 복사 전체는 P50 %s다. 부하 없음에서는 같은 체크포인트가 P50 %s다.\n",
 		seconds(percentile(cp.backupStart, 50)), intPercentile(cp.ckptBuffers, 50), seconds(percentile(cp.ckptWrite, 50)),
 		seconds(percentile(cp.ckptSync, 50)), seconds(percentile(cp.agentCopy, 50)), seconds(percentile(r.conditions[0].copies.backupStart, 50)))
-	w("- 체크포인트가 쓰는 버퍼는 직전 체크포인트 뒤에 부하가 더럽힌 페이지다. `-N`은 1GB `pgbench_accounts`의 임의 행을 고치므로 복사 사이(약 7초)에 1만~2만 개(100~200MB)가 더럽혀진다.\n")
+	w("- 체크포인트가 쓰는 버퍼는 직전 체크포인트 뒤에 부하가 더럽힌 페이지다. `-N`은 1GB `pgbench_accounts`의 임의 행을 고치므로 복사 사이(약 7초)에 버퍼가 더럽혀진다. 이 실행에서는 P50 %d개이고, 버퍼 하나가 8KB라서 약 %s다.\n",
+		intPercentile(cp.ckptBuffers, 50), bytesShort(int64(intPercentile(cp.ckptBuffers, 50))*8192))
 	w("- 시간은 쓰기 단계에서 든다. 2026-10-26의 제한된 실험(같은 크기의 프로젝트, main에 같은 부하, 설정마다 브랜치 생성 5회, main cgroup의 PSI와 `cpu.stat`)에서:\n")
 	w("  - 기본 설정: 쓰기 0.94~3.45초, sync 0.02~0.10초. 생성 한 번 사이에 main의 `io.pressure` 0.5~1.5초, CPU 스로틀링 0.2~1.8초, `memory.pressure` 10ms 이하.\n")
 	w("  - main을 CPU 2로 늘림(스로틀링 0): 쓰기 1.29~2.78초로 그대로, `io.pressure`는 0.6~1.6초로 늘어남. CPU 한도는 주된 원인이 아니다.\n")
 	w("  - `checkpoint_flush_after = 0`(쓰기 중 강제 writeback 끔): 쓰기 1.43~2.85초, sync가 0.37~1.10초로 늘어 합은 그대로. memcg의 더러운 페이지가 105~125MB에서 멈췄다 줄어든다. 1Gi 한도의 memcg에서 dirty 한계에 닿아 쓰기가 장치의 writeback 속도로 묶인다.\n")
-	w("  - `bgwriter_lru_maxpages = 1000`, `bgwriter_lru_multiplier = 10`, `bgwriter_delay = 10ms`: 체크포인트가 쓰는 버퍼가 거의 줄지 않고 생성 P50 2.44초.\n")
+	w("  - `bgwriter_lru_maxpages = 1000`, `bgwriter_lru_multiplier = 10`, `bgwriter_delay = 10ms`: 쓰기 시간과 생성 P50이 나아지지 않았다(생성 P50 2.44초). 체크포인트가 쓰는 버퍼 수의 변화는 확인하지 못했다.\n")
 	w("  - `checkpoint_timeout = 30s`: 버퍼는 반으로 줄지만 체크포인트가 겹쳐 생성 P50 3.96초, 202 두 번. 더 나쁘다.\n")
 	w("  - 머신 디스크: 8k `O_DIRECT` 쓰기 99MB/s, 1M `O_DIRECT` 996MB/s, 8k 버퍼 쓰기 + fsync(순차) 733MB/s. 체크포인트의 흩어진 8k 페이지는 작은 쓰기의 속도(동시 WAL fsync와 나눠 약 60~80MB/s)로 나간다.\n")
-	w("  - reflink 복제(`FICLONE`)는 원본 파일의 더러운 페이지를 먼저 내보내므로 부하 중 복제가 0.3~1.5초로 길어진다(부하 없음 0.1초 안팎).\n")
-	w("- 결론: 원인은 Podman 머신 가상 디스크의 작은 쓰기 속도이고, 복사마다 강제 체크포인트를 거는 설계(스펙 2장)가 그 비용을 생성 시간에 넣는다. 위의 설정은 어느 것도 P50을 1초 아래로 내리지 못해 채택하지 않았다. 제품 설정은 바꾸지 않았다.\n\n")
+	w("  - 부하 중 reflink 복제(`FICLONE`)가 0.3~1.5초로 길어졌다(부하 없음 0.1초 안팎). 원본 파일의 더러운 페이지를 복제 전에 먼저 내보내기 때문일 가능성이 높지만, 따로 가려내지는 못했다.\n")
+	w("- 결론(추정): 가장 큰 원인으로 보이는 것은 Podman 머신 가상 디스크의 작은 쓰기 속도이고, 호스트 경합이 두 번째 변수다(아래 측정 환경 표의 호스트 상태 행, 스왑 사용량과 머신 PSI). 위 실험은 호스트 경합을 따로 떼어 보지 않았으므로 둘의 몫은 나누지 못했다. 복사마다 강제 체크포인트를 거는 설계(스펙 2장)가 그 비용을 생성 시간에 넣는다. 위의 설정은 어느 것도 P50을 1초 아래로 내리지 못해 채택하지 않았다. 제품 설정은 바꾸지 않았다.\n")
+	if len(failed.metrics) > 1 {
+		if q := failed.metrics[1]; q.target > 0 {
+			if ok, applies := q.passed(); applies && !ok {
+				w("- 같은 조건에서 새 브랜치 첫 쿼리도 기준을 넘었다(P95 %s, 기준 %s). **검증하지 않은 가설**: 새 브랜치는 복사하는 동안(에이전트의 복사 전체 P50 %s) main이 쓴 WAL을 기동할 때 다시 적용하므로 부하가 있으면 첫 접속까지가 길어지고, 여기에 호스트 경합이 더해졌을 것이다. 이 실행에서 가려내지 않았다. 같은 조건의 첫 전체 실행에서는 P95가 1.63초였다.\n",
+					seconds(q.value()), seconds(q.target), seconds(percentile(failed.copies.agentCopy, 50)))
+			}
+		}
+	}
+	w("\n")
 }
