@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -46,6 +47,7 @@ type BranchReconciler struct {
 	mu         sync.Mutex
 	notBefore  map[client.ObjectKey]time.Time     // a rate-limited branch is not tried again before this
 	unanswered map[client.ObjectKey]time.Duration // a branch whose supervisor does not answer: the last wait
+	podUIDs    map[client.ObjectKey]types.UID     // the UID of the branch's pod last seen: a new pod starts the wait afresh
 
 	// timed holds, for a branch whose timings are not all recorded yet, which of them the API
 	// server has: a metric is observed when its timing first reaches the API server, not before
@@ -173,6 +175,20 @@ func (r *BranchReconciler) supervisorAnswered(key client.ObjectKey) {
 	delete(r.unanswered, key)
 }
 
+// podSeen notes the pod the branch's supervisor runs in. A new pod is a fresh start: the waits
+// grown on the one before do not apply to it.
+func (r *BranchReconciler) podSeen(key client.ObjectKey, uid types.UID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.podUIDs == nil {
+		r.podUIDs = map[client.ObjectKey]types.UID{}
+	}
+	if r.podUIDs[key] != uid {
+		r.podUIDs[key] = uid
+		delete(r.unanswered, key)
+	}
+}
+
 // forget drops what is kept in memory about a deleted branch, so a new branch of the same name
 // starts afresh.
 func (r *BranchReconciler) forget(key client.ObjectKey) {
@@ -180,6 +196,7 @@ func (r *BranchReconciler) forget(key client.ObjectKey) {
 	defer r.mu.Unlock()
 	delete(r.notBefore, key)
 	delete(r.unanswered, key)
+	delete(r.podUIDs, key)
 	delete(r.timed, key)
 	delete(r.startedAt, key)
 }
@@ -457,7 +474,7 @@ func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b
 			setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, v1alpha1.ReasonPodCreateFailed, err.Error())
 			return false, err
 		}
-		return true, nil
+		return false, nil // its container is not started yet; the pod's status changes bring the branch back
 	case err != nil:
 		return false, err
 	case pod.DeletionTimestamp != nil:
@@ -470,7 +487,26 @@ func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b
 		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, v1alpha1.ReasonUnschedulable, c.Message)
 		return false, nil // no supervisor to call; the pod's status change brings the branch back
 	}
-	return true, nil
+	// Until its container has started there is no supervisor to call. Calling anyway fails, and
+	// each failure would double the wait before the next try (supervisorWait): the pod's early
+	// status changes would grow it to many seconds before the supervisor listens, and a stopped
+	// branch's pod, never Ready, sends no later change to cut that wait short. The change that
+	// marks the container started brings the branch back instead.
+	r.podSeen(client.ObjectKeyFromObject(b), pod.UID)
+	return containerStarted(&pod), nil
+}
+
+// containerStarted reports whether the pod runs and its container has started.
+func containerStarted(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == containerName {
+			return cs.Started != nil && *cs.Started
+		}
+	}
+	return false
 }
 
 // ensureState brings PostgreSQL to spec.state (spec 7.1 step 3, 9.5).

@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -31,6 +32,52 @@ var (
 	kenv *kubetest.Env
 	conn *fakeConnector
 )
+
+// branchReconciler is the manager's Branch reconciler, for tests that look at what it keeps in
+// memory.
+var branchReconciler *BranchReconciler
+
+// kubeletHeld holds back the branch pods of a namespace: the fake kubelet leaves them Pending
+// until the test starts them (startPod). namespace -> true.
+var kubeletHeld sync.Map
+
+// fakeKubelet stands in for the kubelet, which envtest lacks: it marks every branch pod running
+// with its container started, as the real one does once the container runs.
+type fakeKubelet struct{ client.Client }
+
+func (k fakeKubelet) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if _, held := kubeletHeld.Load(req.Namespace); held {
+		return ctrl.Result{}, nil
+	}
+	var pod corev1.Pod
+	if err := k.Get(ctx, req.NamespacedName, &pod); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if pod.Labels[LabelComponent] != ComponentBranch || pod.DeletionTimestamp != nil || containerStarted(&pod) ||
+		unschedulable(&pod) != nil || pod.Status.Phase == corev1.PodFailed || pod.Status.Phase == corev1.PodSucceeded {
+		return ctrl.Result{}, nil
+	}
+	markStarted(&pod)
+	return ctrl.Result{}, client.IgnoreNotFound(k.Status().Update(ctx, &pod))
+}
+
+// markStarted sets a pod's status to running with its containers started.
+func markStarted(pod *corev1.Pod) {
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.ContainerStatuses = nil
+	for _, c := range pod.Spec.Containers {
+		pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+			Name: c.Name, Image: c.Image, Started: ptr.To(true),
+			State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: metav1.Now()}},
+		})
+	}
+}
+
+// startPod does what the fake kubelet does, for a pod it holds back.
+func startPod(t *testing.T, ns, name string) {
+	t.Helper()
+	updateStatus(t, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}, markStarted)
+}
 
 // conflictReady makes the first status update that makes a project Ready fail with a conflict,
 // as if the cache were stale: namespace -> armed. See TestProjectStatusConflictIsRetriedSoon.
@@ -83,7 +130,11 @@ func startManager(e *kubetest.Env) (stop func(), err error) {
 	if err := (&ProjectReconciler{Client: projectConflicts{Client: mgr.GetClient()}, Scheme: mgr.GetScheme(), Connector: conn, AgentImage: testAgentImage}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
-	if err := (&BranchReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Connector: conn, PostgresImage: testPostgresImage}).SetupWithManager(mgr); err != nil {
+	branchReconciler = &BranchReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Connector: conn, PostgresImage: testPostgresImage}
+	if err := branchReconciler.SetupWithManager(mgr); err != nil {
+		return nil, err
+	}
+	if err := ctrl.NewControllerManagedBy(mgr).Named("fake-kubelet").For(&corev1.Pod{}).Complete(fakeKubelet{mgr.GetClient()}); err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())

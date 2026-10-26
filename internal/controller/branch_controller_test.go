@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,5 +341,68 @@ func TestSupervisorWaitGrows(t *testing.T) {
 	}
 	if d := r.supervisorWait(key); d != 2*time.Second {
 		t.Errorf("after forget: %s", d)
+	}
+}
+
+// A branch's supervisor is not called before the container of its pod has started: the calls
+// would fail and grow supervisorWait. Once it has started, a stopped branch is Stopped at once,
+// where it used to wait out the grown wait, about 30 seconds on a real cluster.
+func TestSupervisorIsNotCalledBeforeThePodStarts(t *testing.T) {
+	ns, fp := readyProject(t)
+	kubeletHeld.Store(ns, true)
+	t.Cleanup(func() { kubeletHeld.Delete(ns) })
+	createBranch(t, ns, "dev", "main", func(b *v1alpha1.Branch) { b.Spec.State = v1alpha1.StateStopped })
+	waitPhase(t, ns, "dev", v1alpha1.BranchDataReady)
+	eventually(t, 10*time.Second, func() string {
+		var pod corev1.Pod
+		if err := kenv.Client.Get(context.Background(), client.ObjectKey{Namespace: ns, Name: "br-dev"}, &pod); err != nil {
+			return "pod: " + err.Error()
+		}
+		return ""
+	})
+	time.Sleep(time.Second) // the pod's own events reconcile the branch meanwhile
+
+	for _, c := range fp.callLog() {
+		if strings.HasSuffix(c, "(dev)") && (strings.HasPrefix(c, "Status") || strings.HasPrefix(c, "Stop") || strings.HasPrefix(c, "Start")) {
+			t.Errorf("supervisor called before its container started: %q", fp.callLog())
+			break
+		}
+	}
+	key := client.ObjectKey{Namespace: ns, Name: "dev"}
+	branchReconciler.mu.Lock()
+	wait := branchReconciler.unanswered[key]
+	branchReconciler.mu.Unlock()
+	if wait != 0 {
+		t.Errorf("supervisorWait grew to %s before the container started", wait)
+	}
+
+	start := time.Now()
+	startPod(t, ns, "br-dev")
+	waitPhase(t, ns, "dev", v1alpha1.BranchStopped)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("Stopped %s after the container started", d)
+	}
+}
+
+// A new pod of a branch is a fresh start: the wait grown on the pod before does not apply.
+func TestSupervisorWaitStartsAfreshOnANewPod(t *testing.T) {
+	r := &BranchReconciler{}
+	key := client.ObjectKey{Namespace: "cns-x", Name: "dev"}
+	r.podSeen(key, "uid-1")
+	r.supervisorWait(key)
+	r.supervisorWait(key)
+	r.podSeen(key, "uid-1")
+	if d := r.supervisorWait(key); d != 8*time.Second {
+		t.Errorf("same pod: wait %s, want 8s", d)
+	}
+	r.podSeen(key, "uid-2")
+	if d := r.supervisorWait(key); d != 2*time.Second {
+		t.Errorf("new pod: wait %s, want 2s", d)
+	}
+	r.forget(key)
+	r.supervisorWait(key)
+	r.podSeen(key, "uid-2") // forgotten: a pod seen again after forget counts as new
+	if d := r.supervisorWait(key); d != 2*time.Second {
+		t.Errorf("after forget: wait %s, want 2s", d)
 	}
 }
