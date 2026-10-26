@@ -491,9 +491,33 @@ func (r *BranchReconciler) ensurePod(ctx context.Context, p *v1alpha1.Project, b
 	// each failure would double the wait before the next try (supervisorWait): the pod's early
 	// status changes would grow it to many seconds before the supervisor listens, and a stopped
 	// branch's pod, never Ready, sends no later change to cut that wait short. The change that
-	// marks the container started brings the branch back instead.
+	// marks the container started brings the branch back instead. Meanwhile the branch is not
+	// Ready, and says why: a container that restarts (a liveness kill, an OOM) or never starts
+	// (ImagePullBackOff) must not leave an earlier Ready=True standing. The phase stays as it is,
+	// as for a supervisor that does not answer.
 	r.podSeen(client.ObjectKeyFromObject(b), pod.UID)
-	return containerStarted(&pod), nil
+	if !containerStarted(&pod) {
+		setCondition(&b.Status.Conditions, b.Generation, v1alpha1.ConditionReady, false, v1alpha1.ReasonContainerNotStarted, containerNotStarted(&pod))
+		return false, nil
+	}
+	return true, nil
+}
+
+// containerNotStarted says why the pod's container is not running: the kubelet's waiting or
+// terminated reason.
+func containerNotStarted(pod *corev1.Pod) string {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name != containerName {
+			continue
+		}
+		switch {
+		case cs.State.Waiting != nil && cs.State.Waiting.Reason != "":
+			return cs.State.Waiting.Reason
+		case cs.State.Terminated != nil && cs.State.Terminated.Reason != "":
+			return cs.State.Terminated.Reason
+		}
+	}
+	return "container not started"
 }
 
 // containerStarted reports whether the pod runs and its container has started.

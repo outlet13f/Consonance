@@ -13,6 +13,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -346,7 +347,8 @@ func TestSupervisorWaitGrows(t *testing.T) {
 
 // A branch's supervisor is not called before the container of its pod has started: the calls
 // would fail and grow supervisorWait. Once it has started, a stopped branch is Stopped at once,
-// where it used to wait out the grown wait, about 30 seconds on a real cluster.
+// where it used to wait out the grown wait, about 30 seconds on a real cluster (a few seconds
+// here; the bound leaves room for -race).
 func TestSupervisorIsNotCalledBeforeThePodStarts(t *testing.T) {
 	ns, fp := readyProject(t)
 	kubeletHeld.Store(ns, true)
@@ -379,7 +381,7 @@ func TestSupervisorIsNotCalledBeforeThePodStarts(t *testing.T) {
 	start := time.Now()
 	startPod(t, ns, "br-dev")
 	waitPhase(t, ns, "dev", v1alpha1.BranchStopped)
-	if d := time.Since(start); d > 3*time.Second {
+	if d := time.Since(start); d > 10*time.Second {
 		t.Errorf("Stopped %s after the container started", d)
 	}
 }
@@ -404,5 +406,61 @@ func TestSupervisorWaitStartsAfreshOnANewPod(t *testing.T) {
 	r.podSeen(key, "uid-2") // forgotten: a pod seen again after forget counts as new
 	if d := r.supervisorWait(key); d != 2*time.Second {
 		t.Errorf("after forget: wait %s, want 2s", d)
+	}
+}
+
+// A running branch whose container stops (a liveness kill, an OOM, CrashLoopBackOff) is not
+// Ready while it is down, and says why; it is Ready again once the container runs.
+func TestARestartingContainerIsNotReady(t *testing.T) {
+	ns, _ := readyProject(t)
+	createBranch(t, ns, "dev", "main")
+	waitPhase(t, ns, "dev", v1alpha1.BranchRunning)
+
+	kubeletHeld.Store(ns, true)
+	t.Cleanup(func() { kubeletHeld.Delete(ns) })
+	updateStatus(t, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "br-dev"}}, func(pod *corev1.Pod) {
+		pod.Status.ContainerStatuses[0].Started = ptr.To(false)
+		pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+	})
+	eventually(t, 10*time.Second, func() string {
+		c := meta.FindStatusCondition(getBranch(t, ns, "dev").Status.Conditions, v1alpha1.ConditionReady)
+		if c == nil || c.Status != metav1.ConditionFalse || c.Reason != v1alpha1.ReasonContainerNotStarted || c.Message != "CrashLoopBackOff" {
+			return fmt.Sprintf("Ready %+v", c)
+		}
+		return ""
+	})
+	key := client.ObjectKey{Namespace: ns, Name: "dev"}
+	branchReconciler.mu.Lock()
+	wait := branchReconciler.unanswered[key]
+	branchReconciler.mu.Unlock()
+	if wait != 0 {
+		t.Errorf("supervisorWait grew to %s while the container was down", wait)
+	}
+
+	startPod(t, ns, "br-dev")
+	eventually(t, 10*time.Second, func() string {
+		if c := cond(getBranch(t, ns, "dev").Status.Conditions, v1alpha1.ConditionReady); c != "True/Running" {
+			return "Ready " + c
+		}
+		return ""
+	})
+}
+
+func TestContainerNotStartedMessage(t *testing.T) {
+	status := func(st corev1.ContainerState) *corev1.Pod {
+		return &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: containerName, State: st}}}}
+	}
+	for _, c := range []struct {
+		pod  *corev1.Pod
+		want string
+	}{
+		{status(corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}}), "ImagePullBackOff"},
+		{status(corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "OOMKilled"}}), "OOMKilled"},
+		{status(corev1.ContainerState{}), "container not started"},
+		{&corev1.Pod{}, "container not started"},
+	} {
+		if got := containerNotStarted(c.pod); got != c.want {
+			t.Errorf("containerNotStarted(%+v) = %q, want %q", c.pod.Status, got, c.want)
+		}
 	}
 }

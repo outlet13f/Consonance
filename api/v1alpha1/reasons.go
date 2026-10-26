@@ -22,6 +22,7 @@ const (
 	ReasonStartFailed           = "StartFailed"
 	ReasonUnschedulable         = "Unschedulable" // a Project's AgentReady uses it too
 	ReasonPodCreateFailed       = "PodCreateFailed"
+	ReasonContainerNotStarted   = "ContainerNotStarted" // the pod's container is not running; the message is why (CrashLoopBackOff, ImagePullBackOff...)
 )
 
 // Reasons of a Project's conditions.
