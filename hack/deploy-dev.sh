@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Installs Consonance into the dev cluster: the admin key Secret, then config/default (CRDs,
-# RBAC, admission policy, operator, API server). Run it after `make dev-cluster images load-images`.
+# RBAC, admission policy, operator, API server), and restarts the operator and the API server so
+# they run the images just loaded. Run it after `make dev-cluster images load-images`.
 #
 # The admin key is bin/dev/admin-key (git-ignored, 32 random bytes as base64url, 43 characters).
 # It is made once and never replaced, so the key a client holds stays valid across re-runs; the
-# script never prints it (it fixes the file's mode to 600 on every run). Delete the file to get a new key (and rerun to roll it out; the API
-# server reads the key at start, so `kubectl -n consonance-system rollout restart
-# deployment/consonance-apiserver` follows).
+# script never prints it (it fixes the file's mode to 600 on every run). Delete the file and
+# rerun to get a new key; the rerun restarts the API server, which reads the key at start.
 #
 # It uses bin/dev/kubeconfig (or $DEV_KUBECONFIG), not $KUBECONFIG.
 #
@@ -49,6 +49,10 @@ up() {
   echo "secret/consonance-admin-key applied"
 
   kubectl apply -k "$ROOT/config/default"
+  # The images keep their :dev tags across rebuilds, so apply alone leaves the running pods on the
+  # images they started with (imagePullPolicy Never). Restart both so they run what
+  # `make images load-images` put in the cluster.
+  kubectl -n "$NS" rollout restart deployment/consonance-operator deployment/consonance-apiserver
   kubectl -n "$NS" rollout status deployment/consonance-operator --timeout=180s
   kubectl -n "$NS" rollout status deployment/consonance-apiserver --timeout=180s
   kubectl -n "$NS" wait --for=condition=Available deployment --all --timeout=60s
