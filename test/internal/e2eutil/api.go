@@ -186,7 +186,8 @@ func (c *Client) Expect(t testing.TB, method, path string, body, out any, want .
 	}
 	if out != nil {
 		if err := json.Unmarshal(r.Body, out); err != nil {
-			t.Fatalf("%s %s: decode %T: %v: %s", method, path, out, err, r.Body)
+			// Not the body: a connection's carries the database password.
+			t.Fatalf("%s %s: decode %T from a %d answer of %d bytes: %v", method, path, out, r.Status, len(r.Body), err)
 		}
 	}
 	return r

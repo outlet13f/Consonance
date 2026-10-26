@@ -85,15 +85,17 @@ spec:
 		e2eutil.SystemNamespace: nil, // whatever runs there
 	}
 	for n, want := range pods {
+		// A pod being deleted (an old ReplicaSet's, after deploy-dev restarts the deployments)
+		// is left out: it was admitted, and is on its way out.
 		out := e2eutil.Kubectl(t, "-n", n, "get", "pods", "-o",
-			`jsonpath={range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}`)
+			`jsonpath={range .items[*]}{.metadata.name}{"|"}{.status.phase}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"\n"}{end}`)
 		running := map[string]bool{}
 		for _, line := range strings.Split(out, "\n") {
-			f := strings.Fields(line)
-			if len(f) == 0 {
+			f := strings.Split(line, "|")
+			if len(f) != 4 || f[3] != "" { // an empty line, or a pod being deleted
 				continue
 			}
-			if len(f) != 3 || f[1] != "Running" || f[2] != "True" {
+			if f[1] != "Running" || f[2] != "True" {
 				t.Errorf("pod %s/%s is not running and ready: %q", n, f[0], line)
 				continue
 			}

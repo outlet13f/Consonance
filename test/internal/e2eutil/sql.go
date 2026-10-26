@@ -23,31 +23,45 @@ func ServiceOf(host string) (svc, ns string, err error) {
 }
 
 // SQL connects to a branch as the tenant role of conn through a port-forward to the branch's
-// Service, retrying for a minute, and closes the connection when the test ends. The forward
-// targets the pod running now: after a stop and start, a rollback or a reset, connect again.
+// Service, retrying for a minute, and closes the connection when the test ends. Each try forwards
+// afresh: kubectl usually ends a forward whose connection inside the pod was refused, so a retry
+// over the old one would hit a dead forward. The forward targets the pod running now: after a
+// stop and start, a rollback or a reset, connect again.
 func SQL(t testing.TB, conn Connection) *pgx.Conn {
 	t.Helper()
+	mustLoad(t)
 	svc, ns, err := ServiceOf(conn.Host)
 	if err != nil {
 		t.Fatal(err)
 	}
-	local := PortForward(t, ns, "svc/"+svc, conn.Port)
-	cfg, err := pgx.ParseConfig(fmt.Sprintf("host=127.0.0.1 port=%d sslmode=disable connect_timeout=10", local))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.User, cfg.Password, cfg.Database = conn.User, conn.Password, conn.Database
 
-	var db *pgx.Conn
+	var (
+		db   *pgx.Conn
+		stop func()
+	)
 	Eventually(t, time.Minute, time.Second, "connect to "+conn.Host, func() (bool, string) {
+		local, stopForward, err := startPortForward(ns, "svc/"+svc, conn.Port)
+		if err != nil {
+			return false, "port-forward: " + err.Error()
+		}
+		cfg, err := pgx.ParseConfig(fmt.Sprintf("host=127.0.0.1 port=%d sslmode=disable connect_timeout=10", local))
+		if err != nil {
+			stopForward()
+			t.Fatal(err)
+		}
+		cfg.User, cfg.Password, cfg.Database = conn.User, conn.Password, conn.Database
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		db, err = pgx.ConnectConfig(ctx, cfg)
 		if err != nil {
+			stopForward()
 			return false, err.Error()
 		}
+		stop = stopForward
 		return true, ""
 	})
+	// Cleanups run last first: the connection closes before its forward stops.
+	t.Cleanup(stop)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

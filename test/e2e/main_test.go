@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -21,31 +22,50 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "FAIL: the development cluster is not ready: %v\n", err)
 		os.Exit(1)
 	}
+	before, err := projectNamespaces()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FAIL: list project namespaces: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
-	if !leavesNothingBehind() {
+	if !leavesNothingBehind(before) {
 		code = 1
 	}
 	os.Exit(code)
 }
 
+func projectNamespaces() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	return e2eutil.ProjectNamespaces(ctx)
+}
+
 // leavesNothingBehind is TestE2ELeavesNothingBehind: after every test, whether it passed or not,
-// no cns- namespace is left (plan 5 Review Focus 2). It runs in TestMain because it has to come
-// after the other tests and their cleanups.
-func leavesNothingBehind() bool {
+// no cns- namespace made during the run is left (plan 5 Review Focus 2). Namespaces that were
+// there before (another user's projects, a performance run) are not this run's to judge. It runs
+// in TestMain because it has to come after the other tests and their cleanups.
+func leavesNothingBehind(before []string) bool {
 	const name = "TestE2ELeavesNothingBehind"
 	fmt.Printf("=== RUN   %s\n", name)
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	left, err := e2eutil.ProjectNamespaces(ctx)
+	now, err := projectNamespaces()
 	elapsed := time.Since(start).Seconds()
-	switch {
-	case err != nil:
+	if err != nil {
 		fmt.Printf("    %v\n--- FAIL: %s (%.2fs)\n", err, name, elapsed)
 		return false
-	case len(left) > 0:
+	}
+	var left []string
+	for _, ns := range now {
+		if !slices.Contains(before, ns) {
+			left = append(left, ns)
+		}
+	}
+	if len(left) > 0 {
 		fmt.Printf("    project namespaces left behind: %v\n--- FAIL: %s (%.2fs)\n", left, name, elapsed)
 		return false
+	}
+	if len(before) > 0 {
+		fmt.Printf("    not judged, there before the run: %v\n", before)
 	}
 	fmt.Printf("--- PASS: %s (%.2fs)\n", name, elapsed)
 	return true

@@ -25,15 +25,17 @@ func CreateProject(t testing.TB, c *Client, displayName string) string {
 	t.Helper()
 	var p Project
 	c.Expect(t, http.MethodPost, "/v1/projects", map[string]any{"displayName": displayName}, &p, http.StatusAccepted)
+	if p.ID != "" { // first, so that a check below that fails still deletes it
+		t.Cleanup(func() { deleteProject(t, c, p.ID) })
+		t.Cleanup(func() {
+			if t.Failed() {
+				Diagnose(t, Namespace(p.ID))
+			}
+		})
+	}
 	if p.ID == "" || p.Phase != "Provisioning" {
 		t.Fatalf("create project: want an ID and phase Provisioning, got %+v", p)
 	}
-	t.Cleanup(func() { deleteProject(t, c, p.ID) })
-	t.Cleanup(func() {
-		if t.Failed() {
-			Diagnose(t, Namespace(p.ID))
-		}
-	})
 	return p.ID
 }
 
