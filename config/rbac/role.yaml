@@ -7,24 +7,42 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - events
+  - persistentvolumeclaims
+  - secrets
   verbs:
   - create
-  - patch
+  - get
+  - list
+  - watch
 - apiGroups:
   - ""
   resources:
-  - persistentvolumeclaims
   - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - resourcequotas
-  - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - services
   verbs:
   - create
   - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -33,27 +51,18 @@ rules:
   - branches
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
   - consonance.io
   resources:
   - branches/finalizers
-  - projects/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - consonance.io
-  resources:
   - branches/status
+  - projects/finalizers
   - projects/status
   verbs:
-  - get
-  - patch
   - update
 - apiGroups:
   - consonance.io
@@ -64,21 +73,33 @@ rules:
   - list
   - watch
 - apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - networking.k8s.io
   resources:
   - networkpolicies
+  verbs:
+  - create
+  - get
+  - list
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: consonance-operator
+  namespace: consonance-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
   verbs:
   - create
   - delete

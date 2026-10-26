@@ -14,8 +14,8 @@ import (
 
 // Leader election and events of the manager.
 //
-// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=coordination.k8s.io,namespace=consonance-system,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",namespace=consonance-system,resources=events,verbs=create;patch
 
 // CacheOptions limit the manager's cache to the objects the operator makes, all labelled
 // managed-by=consonance-operator: it then neither holds every secret of the cluster nor watches

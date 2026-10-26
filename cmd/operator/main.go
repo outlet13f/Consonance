@@ -39,6 +39,7 @@ type config struct {
 	probeAddr     string
 	kubeconfig    string
 	leaderElect   bool
+	leaderNS      string
 }
 
 func parseFlags(args []string) (config, error) {
@@ -50,6 +51,7 @@ func parseFlags(args []string) (config, error) {
 	fs.StringVar(&c.probeAddr, "health-probe-bind-address", ":8081", "liveness and readiness listen address")
 	fs.StringVar(&c.kubeconfig, "kubeconfig", "", "kubeconfig file; empty means $KUBECONFIG, then in-cluster, then ~/.kube/config")
 	fs.BoolVar(&c.leaderElect, "leader-elect", false, "elect one leader among replicas")
+	fs.StringVar(&c.leaderNS, "leader-election-namespace", "consonance-system", "namespace of the leader election lease (used only with --leader-elect)")
 	if err := fs.Parse(args); err != nil {
 		return c, err
 	}
@@ -57,6 +59,16 @@ func parseFlags(args []string) (config, error) {
 		return c, fmt.Errorf("unexpected arguments %q", fs.Args())
 	}
 	return c, nil
+}
+
+// leaderNamespace is the namespace of the lease, set only when leader election is on: the lease
+// and its Role are in consonance-system, not wherever the pod happens to run (out of cluster,
+// controller-runtime would otherwise have no namespace to use).
+func leaderNamespace(c config) string {
+	if !c.leaderElect {
+		return ""
+	}
+	return c.leaderNS
 }
 
 func run(args []string) error {
@@ -85,7 +97,9 @@ func run(args []string) error {
 		HealthProbeBindAddress: c.probeAddr,
 		LeaderElection:         c.leaderElect,
 		LeaderElectionID:       "consonance-operator",
-		Cache:                  controller.CacheOptions(),
+		// Empty outside --leader-elect: controller-runtime then reads no namespace at all.
+		LeaderElectionNamespace: leaderNamespace(c),
+		Cache:                   controller.CacheOptions(),
 	})
 	if err != nil {
 		return fmt.Errorf("manager: %w", err)

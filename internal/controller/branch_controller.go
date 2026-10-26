@@ -30,8 +30,8 @@ import (
 
 // The Branch reconcile's permissions (config/rbac/role.yaml, make generate).
 //
-// +kubebuilder:rbac:groups=consonance.io,resources=branches,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=consonance.io,resources=branches/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=consonance.io,resources=branches,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=consonance.io,resources=branches/status,verbs=update
 // +kubebuilder:rbac:groups=consonance.io,resources=branches/finalizers,verbs=update
 // +kubebuilder:rbac:groups=consonance.io,resources=projects,verbs=get;list;watch
 

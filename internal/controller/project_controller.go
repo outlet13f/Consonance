@@ -35,12 +35,19 @@ const (
 
 // The Project reconcile's permissions (config/rbac/role.yaml, make generate).
 //
+// Secrets and the volume are only made (never changed or deleted: they go with the namespace); pods
+// are made and deleted; services, quotas and policies are kept with CreateOrUpdate (get, create,
+// update), and a deleted branch deletes its service.
+//
 // +kubebuilder:rbac:groups=consonance.io,resources=projects,verbs=get;list;watch
-// +kubebuilder:rbac:groups=consonance.io,resources=projects/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=consonance.io,resources=projects/status,verbs=update
 // +kubebuilder:rbac:groups=consonance.io,resources=projects/finalizers,verbs=update
-// +kubebuilder:rbac:groups=consonance.io,resources=branches,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets;persistentvolumeclaims;pods;services;resourcequotas,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=consonance.io,resources=branches,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=secrets;persistentvolumeclaims,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update
 
 // ProjectReconciler carries out spec 7.1's Project steps.
 type ProjectReconciler struct {
