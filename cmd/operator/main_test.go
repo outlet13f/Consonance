@@ -189,16 +189,22 @@ func TestOperatorRoleHasOnlyWhatItUses(t *testing.T) {
 	if role.Namespace != systemNamespace {
 		t.Errorf("the Role is in namespace %q, want %q", role.Namespace, systemNamespace)
 	}
-	inRole := map[string]bool{}
+	// The Role holds exactly what client-go's lease lock (get, create, update) and the leader
+	// election's events (create, patch) call.
+	inRole := map[string][]string{}
 	for _, rule := range role.Rules {
 		for _, res := range rule.Resources {
-			inRole[res] = true
+			inRole[res] = append(inRole[res], rule.Verbs...)
 		}
 	}
-	for _, res := range []string{"leases", "events"} {
-		if !inRole[res] {
-			t.Errorf("the Role has no rule for %s", res)
+	for res, want := range map[string][]string{"leases": {"create", "get", "update"}, "events": {"create", "patch"}} {
+		got := slices.Sorted(slices.Values(inRole[res]))
+		if !slices.Equal(got, want) {
+			t.Errorf("the Role grants %v on %s, want %v", got, res, want)
 		}
+	}
+	if len(inRole) != 2 {
+		t.Errorf("the Role has rules for %v, want only leases and events", inRole)
 	}
 }
 

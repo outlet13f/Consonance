@@ -12,9 +12,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// Leader election and events of the manager.
+// Leader election and events of the manager. client-go's lease lock only gets, creates and updates
+// the lease.
 //
-// +kubebuilder:rbac:groups=coordination.k8s.io,namespace=consonance-system,resources=leases,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=coordination.k8s.io,namespace=consonance-system,resources=leases,verbs=get;create;update
 // +kubebuilder:rbac:groups="",namespace=consonance-system,resources=events,verbs=create;patch
 
 // CacheOptions limit the manager's cache to the objects the operator makes, all labelled
