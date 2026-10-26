@@ -274,3 +274,54 @@ func TestEachRequestIsLoggedOnce(t *testing.T) {
 		t.Errorf("a successful request logged an error: %v", ok)
 	}
 }
+
+// A request that carries a valid X-Request-Id is logged with it, failed or not; a missing or
+// invalid one is logged as an empty requestId.
+func TestRequestIDIsLogged(t *testing.T) {
+	var logs lockedBuffer
+	ops := &agenttest.FakeOps{}
+	srv := httptest.NewServer((&agent.Server{Token: token, Ops: ops, Log: slog.New(slog.NewJSONHandler(&logs, nil))}).Handler())
+	t.Cleanup(srv.Close)
+
+	send := func(method, path, id string) {
+		t.Helper()
+		req, err := http.NewRequest(method, srv.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set(agentapi.TokenHeader, token)
+		if id != "" {
+			req.Header.Set(agentapi.RequestIDHeader, id)
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	send("GET", "/v1/branches/main/generations", "r1")
+	ops.SetErr(fmt.Errorf("%w (waited 2s)", volume.ErrBusy))
+	send("DELETE", "/v1/branches/dev/data", "req_2-B")
+	ops.SetErr(nil)
+	send("GET", "/v1/branches/main/generations", "")
+	send("GET", "/v1/branches/main/generations", "has space")
+	send("GET", "/v1/branches/main/generations", strings.Repeat("a", 65))
+
+	var lines []string
+	deadline := time.Now().Add(2 * time.Second)
+	for lines = logs.lines(); len(lines) < 5 && time.Now().Before(deadline); lines = logs.lines() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(lines) != 5 {
+		t.Fatalf("got %d log lines, want 5:\n%s", len(lines), strings.Join(lines, "\n"))
+	}
+	for i, want := range []string{"r1", "req_2-B", "", "", ""} {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := rec["requestId"]; !ok || got != want {
+			t.Errorf("line %d: requestId = %v (present %v), want %q: %s", i, got, ok, want, lines[i])
+		}
+	}
+}

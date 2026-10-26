@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -73,6 +74,7 @@ type fakeProject struct {
 	badGenerations map[string]int       // branch → a generation PostgreSQL does not start on
 	tokens         map[string]bool
 	calls          []string
+	callIDs        []string // the X-Request-Id of each call in calls, "" when it had none
 }
 
 type fakeData struct {
@@ -129,6 +131,20 @@ func (p *fakeProject) callLog() []string {
 	return slices.Clone(p.calls)
 }
 
+// requestIDs returns the request ID of every call whose description starts with prefix, in
+// order; "" stands for a call without one.
+func (p *fakeProject) requestIDs(prefix string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []string
+	for i, c := range p.calls {
+		if strings.HasPrefix(c, prefix) {
+			out = append(out, p.callIDs[i])
+		}
+	}
+	return out
+}
+
 func (p *fakeProject) generations(branch string) (current int, gens []int, ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -160,9 +176,11 @@ func (p *fakeProject) seenTokens() []string {
 }
 
 // call records a call and returns the error injected for it, if any. p.mu is held.
-func (p *fakeProject) call(token, op, desc string) error {
+func (p *fakeProject) call(ctx context.Context, token, op, desc string) error {
 	p.tokens[token] = true
 	p.calls = append(p.calls, desc)
+	id, _ := agentapi.RequestIDFrom(ctx)
+	p.callIDs = append(p.callIDs, id)
 	if errs := p.failures[op]; len(errs) > 0 {
 		p.failures[op] = errs[1:]
 		return errs[0]
@@ -221,31 +239,31 @@ type fakeAgent struct {
 	token string
 }
 
-func (a *fakeAgent) Preflight(context.Context) (agentapi.Preflight, error) {
+func (a *fakeAgent) Preflight(ctx context.Context) (agentapi.Preflight, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "Preflight", "Preflight"); err != nil {
+	if err := p.call(ctx, a.token, "Preflight", "Preflight"); err != nil {
 		return agentapi.Preflight{}, err
 	}
 	return p.preflight, nil
 }
 
-func (a *fakeAgent) Usage(context.Context) (agentapi.Usage, error) {
+func (a *fakeAgent) Usage(ctx context.Context) (agentapi.Usage, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "Usage", "Usage"); err != nil {
+	if err := p.call(ctx, a.token, "Usage", "Usage"); err != nil {
 		return agentapi.Usage{}, err
 	}
 	return agentapi.Usage{CapacityBytes: 10 << 30, UsedBytes: 1 << 30, AvailableBytes: 9 << 30}, nil
 }
 
-func (a *fakeAgent) InitMain(context.Context) (agentapi.Generation, error) {
+func (a *fakeAgent) InitMain(ctx context.Context) (agentapi.Generation, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "InitMain", "InitMain"); err != nil {
+	if err := p.call(ctx, a.token, "InitMain", "InitMain"); err != nil {
 		return agentapi.Generation{}, err
 	}
 	if p.data[agentapi.MainBranch] == nil {
@@ -254,11 +272,11 @@ func (a *fakeAgent) InitMain(context.Context) (agentapi.Generation, error) {
 	return agentapi.Generation{Generation: p.data[agentapi.MainBranch].current}, nil
 }
 
-func (a *fakeAgent) CreateBranchData(_ context.Context, name string, req agentapi.CreateBranchDataRequest) (agentapi.BranchData, error) {
+func (a *fakeAgent) CreateBranchData(ctx context.Context, name string, req agentapi.CreateBranchDataRequest) (agentapi.BranchData, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "CreateBranchData", fmt.Sprintf("CreateBranchData(%s,%s,%s)", name, req.Parent, req.Source.Type)); err != nil {
+	if err := p.call(ctx, a.token, "CreateBranchData", fmt.Sprintf("CreateBranchData(%s,%s,%s)", name, req.Parent, req.Source.Type)); err != nil {
 		return agentapi.BranchData{}, err
 	}
 	if d := p.data[name]; d != nil { // a retry: the data is there
@@ -287,11 +305,11 @@ func (a *fakeAgent) CreateBranchData(_ context.Context, name string, req agentap
 	return agentapi.BranchData{Generation: 1, BackupStartLSN: lsn}, nil
 }
 
-func (a *fakeAgent) DeleteBranchData(_ context.Context, name string) error {
+func (a *fakeAgent) DeleteBranchData(ctx context.Context, name string) error {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "DeleteBranchData", fmt.Sprintf("DeleteBranchData(%s)", name)); err != nil {
+	if err := p.call(ctx, a.token, "DeleteBranchData", fmt.Sprintf("DeleteBranchData(%s)", name)); err != nil {
 		return err
 	}
 	if name == agentapi.MainBranch {
@@ -310,11 +328,11 @@ func (a *fakeAgent) DeleteBranchData(_ context.Context, name string) error {
 	return nil
 }
 
-func (a *fakeAgent) ListGenerations(_ context.Context, branch string) (agentapi.Generations, error) {
+func (a *fakeAgent) ListGenerations(ctx context.Context, branch string) (agentapi.Generations, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "ListGenerations", fmt.Sprintf("ListGenerations(%s)", branch)); err != nil {
+	if err := p.call(ctx, a.token, "ListGenerations", fmt.Sprintf("ListGenerations(%s)", branch)); err != nil {
 		return agentapi.Generations{}, err
 	}
 	d := p.data[branch]
@@ -324,11 +342,11 @@ func (a *fakeAgent) ListGenerations(_ context.Context, branch string) (agentapi.
 	return agentapi.Generations{Current: d.current, Generations: slices.Clone(d.gens)}, nil
 }
 
-func (a *fakeAgent) CreateGeneration(_ context.Context, branch string, req agentapi.CreateGenerationRequest) (agentapi.Generation, error) {
+func (a *fakeAgent) CreateGeneration(ctx context.Context, branch string, req agentapi.CreateGenerationRequest) (agentapi.Generation, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "CreateGeneration", fmt.Sprintf("CreateGeneration(%s,%s)", branch, req.Source.Type)); err != nil {
+	if err := p.call(ctx, a.token, "CreateGeneration", fmt.Sprintf("CreateGeneration(%s,%s)", branch, req.Source.Type)); err != nil {
 		return agentapi.Generation{}, err
 	}
 	d := p.data[branch]
@@ -357,11 +375,11 @@ func (a *fakeAgent) CreateGeneration(_ context.Context, branch string, req agent
 	return agentapi.Generation{Generation: n}, nil
 }
 
-func (a *fakeAgent) ActivateGeneration(_ context.Context, branch string, n int) (agentapi.Generations, error) {
+func (a *fakeAgent) ActivateGeneration(ctx context.Context, branch string, n int) (agentapi.Generations, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "ActivateGeneration", fmt.Sprintf("ActivateGeneration(%s,%d)", branch, n)); err != nil {
+	if err := p.call(ctx, a.token, "ActivateGeneration", fmt.Sprintf("ActivateGeneration(%s,%d)", branch, n)); err != nil {
 		return agentapi.Generations{}, err
 	}
 	d := p.data[branch]
@@ -392,11 +410,11 @@ func (a *fakeAgent) DetachGeneration(ctx context.Context, branch string, n int, 
 	return resp, err
 }
 
-func (a *fakeAgent) detachGeneration(_ context.Context, branch string, n int, req agentapi.DetachRequest) (agentapi.DetachResponse, error) {
+func (a *fakeAgent) detachGeneration(ctx context.Context, branch string, n int, req agentapi.DetachRequest) (agentapi.DetachResponse, error) {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "DetachGeneration", fmt.Sprintf("DetachGeneration(%s,%d,%s,%v)", branch, n, req.ToBranch, req.AsRestorePoint)); err != nil {
+	if err := p.call(ctx, a.token, "DetachGeneration", fmt.Sprintf("DetachGeneration(%s,%d,%s,%v)", branch, n, req.ToBranch, req.AsRestorePoint)); err != nil {
 		return agentapi.DetachResponse{}, err
 	}
 	d := p.data[branch]
@@ -437,11 +455,11 @@ func (a *fakeAgent) detachGeneration(_ context.Context, branch string, n int, re
 	return agentapi.DetachResponse{RestorePoint: &agentapi.RestorePoint{ID: id, Branch: branch, Reason: agentapi.ReasonReset}}, nil
 }
 
-func (a *fakeAgent) DeleteGeneration(_ context.Context, branch string, n int) error {
+func (a *fakeAgent) DeleteGeneration(ctx context.Context, branch string, n int) error {
 	p := a.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.call(a.token, "DeleteGeneration", fmt.Sprintf("DeleteGeneration(%s,%d)", branch, n)); err != nil {
+	if err := p.call(ctx, a.token, "DeleteGeneration", fmt.Sprintf("DeleteGeneration(%s,%d)", branch, n)); err != nil {
 		return err
 	}
 	d := p.data[branch]
@@ -473,12 +491,12 @@ func (s *fakeSupervisor) status(pg *fakePG) supervisorapi.Status {
 	return supervisorapi.Status{PG: pg.state, Generation: genName(pg.gen)}
 }
 
-func (s *fakeSupervisor) Status(context.Context) (supervisorapi.Status, error) {
+func (s *fakeSupervisor) Status(ctx context.Context) (supervisorapi.Status, error) {
 	p := s.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	op := "Status(" + s.branch + ")"
-	if err := p.call(s.token, op, op); err != nil {
+	if err := p.call(ctx, s.token, op, op); err != nil {
 		return supervisorapi.Status{}, err
 	}
 	pg, err := p.up(s.branch)
@@ -488,12 +506,12 @@ func (s *fakeSupervisor) Status(context.Context) (supervisorapi.Status, error) {
 	return s.status(pg), nil
 }
 
-func (s *fakeSupervisor) Start(context.Context) (supervisorapi.Status, error) {
+func (s *fakeSupervisor) Start(ctx context.Context) (supervisorapi.Status, error) {
 	p := s.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	op := "Start(" + s.branch + ")"
-	if err := p.call(s.token, op, op); err != nil {
+	if err := p.call(ctx, s.token, op, op); err != nil {
 		return supervisorapi.Status{}, err
 	}
 	pg, err := p.up(s.branch)
@@ -516,12 +534,12 @@ func (s *fakeSupervisor) Start(context.Context) (supervisorapi.Status, error) {
 	return s.status(pg), nil
 }
 
-func (s *fakeSupervisor) Stop(context.Context) (supervisorapi.Status, error) {
+func (s *fakeSupervisor) Stop(ctx context.Context) (supervisorapi.Status, error) {
 	p := s.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	op := "Stop(" + s.branch + ")"
-	if err := p.call(s.token, op, op); err != nil {
+	if err := p.call(ctx, s.token, op, op); err != nil {
 		return supervisorapi.Status{}, err
 	}
 	pg, err := p.up(s.branch)
@@ -535,12 +553,12 @@ func (s *fakeSupervisor) Stop(context.Context) (supervisorapi.Status, error) {
 	return s.status(pg), nil
 }
 
-func (s *fakeSupervisor) Bootstrap(context.Context) (supervisorapi.Status, error) {
+func (s *fakeSupervisor) Bootstrap(ctx context.Context) (supervisorapi.Status, error) {
 	p := s.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	op := "Bootstrap(" + s.branch + ")"
-	if err := p.call(s.token, op, op); err != nil {
+	if err := p.call(ctx, s.token, op, op); err != nil {
 		return supervisorapi.Status{}, err
 	}
 	pg, err := p.up(s.branch)

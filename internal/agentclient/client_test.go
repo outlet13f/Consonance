@@ -181,3 +181,27 @@ func TestClientDoesNotFollowRedirects(t *testing.T) {
 		t.Fatal("New changed the caller's http.Client")
 	}
 }
+
+func TestClientSendsTheRequestIDOfItsContext(t *testing.T) {
+	var got []string // the X-Request-Id of each call, "" when absent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get(agentapi.RequestIDHeader))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(srv.Close)
+	c := agentclient.New(srv.URL, "t", nil)
+
+	for _, ctx := range []context.Context{
+		agentapi.WithRequestID(context.Background(), "r1"),
+		context.Background(),
+		agentapi.WithRequestID(context.Background(), "bad id\nX-Evil: 1"), // never sent
+	} {
+		if _, err := c.Usage(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if want := []string{"r1", "", ""}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("X-Request-Id of the calls = %q, want %q", got, want)
+	}
+}

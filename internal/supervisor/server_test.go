@@ -1,10 +1,12 @@
 package supervisor_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"consonance/internal/agentapi"
 	"consonance/internal/pgctl"
 	"consonance/internal/supervisor"
 	"consonance/internal/supervisor/supervisortest"
@@ -287,5 +290,56 @@ func TestBootstrapCallsDoNotOverlap(t *testing.T) {
 	}
 	if got := ran.Load(); got != 2 {
 		t.Errorf("bootstrap ran %d times, want 2: the second call has to wait for the first, not be dropped", got)
+	}
+}
+
+// Each /v1 request is logged once with the requestId of its X-Request-Id header, and with the
+// error of a failed one; a missing or invalid id is logged as empty and the probes not at all.
+func TestRequestIDIsLogged(t *testing.T) {
+	var logs bytes.Buffer
+	pg := supervisortest.NewFakePostgres(pgctl.StateRunning)
+	pg.StopErr = errors.New("pg_ctl failed")
+	h := (&supervisor.Server{
+		Log:          slog.New(slog.NewJSONHandler(&logs, nil)),
+		Token:        token,
+		PG:           pg,
+		Backups:      &supervisortest.FakeBackups{},
+		Generation:   func() string { return "data-1" },
+		StopGrace:    time.Second,
+		StartTimeout: time.Second,
+	}).Handler()
+
+	send := func(method, path, id string) {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set(supervisorapi.TokenHeader, token)
+		if id != "" {
+			req.Header.Set(agentapi.RequestIDHeader, id)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	send("GET", "/v1/status", "r1")
+	send("POST", "/v1/stop", "req_2-B") // fails with 500
+	send("GET", "/v1/status", "")
+	send("GET", "/v1/status", "has space")
+	send("GET", "/healthz", "r1")
+	send("GET", "/readyz", "r1")
+
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("got %d log lines, want 4 (none for the probes):\n%s", len(lines), logs.String())
+	}
+	for i, want := range []string{"r1", "req_2-B", "", ""} {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := rec["requestId"]; !ok || got != want || rec["msg"] != "request" {
+			t.Errorf("line %d: requestId = %v (present %v), want %q: %s", i, got, ok, want, lines[i])
+		}
+	}
+	var failed map[string]any
+	_ = json.Unmarshal([]byte(lines[1]), &failed)
+	if failed["op"] != "POST /v1/stop" || failed["status"] != float64(500) || failed["level"] != "ERROR" || failed["err"] != "pg_ctl failed" {
+		t.Errorf("failed request logged as %v", failed)
 	}
 }

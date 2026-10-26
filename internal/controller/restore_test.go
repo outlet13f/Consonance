@@ -64,6 +64,21 @@ func runningDev(t *testing.T) (string, *fakeProject) {
 	return ns, fp
 }
 
+// requireRequestID checks that every call starting with one of the prefixes carried the request's
+// id: the operator passes spec.restore.requestId to the agent and the supervisor on every step,
+// so a request can be followed in their logs. Rollback and reset tests call it rather than own a
+// project each: the envtest API server never frees the service IPs of finished tests, and -count=2
+// of the package is already near its range.
+func requireRequestID(t *testing.T, fp *fakeProject, id string, prefixes ...string) {
+	t.Helper()
+	for _, prefix := range prefixes {
+		ids := fp.requestIDs(prefix)
+		if len(ids) == 0 || slices.ContainsFunc(ids, func(got string) bool { return got != id }) {
+			t.Errorf("%s: request IDs %q, want every call to carry %q", prefix, ids, id)
+		}
+	}
+}
+
 func TestRollback(t *testing.T) {
 	ns, fp := runningDev(t)
 	fp.addRestorePoint(testRP, "dev")
@@ -82,6 +97,11 @@ func TestRollback(t *testing.T) {
 	}
 	if !inOrder(fp.callLog(), want) {
 		t.Errorf("calls %q, want in order %q", fp.callLog(), want)
+	}
+	requireRequestID(t, fp, "r1", "CreateGeneration(dev", "Stop(dev)", "ActivateGeneration(dev", "Start(dev)", "DetachGeneration(dev")
+	// Calls outside a restore carry none: the branch's own data copy, and the backup branch.
+	if ids := fp.requestIDs("CreateBranchData(dev,"); len(ids) == 0 || slices.ContainsFunc(ids, func(id string) bool { return id != "" }) {
+		t.Errorf("CreateBranchData(dev,: request IDs %q, want calls without one", ids)
 	}
 	b = waitPhase(t, ns, "dev", v1alpha1.BranchRunning)
 	if b.Status.DataGeneration != 2 {
@@ -111,6 +131,7 @@ func TestReset(t *testing.T) {
 	if !inOrder(fp.callLog(), []string{"CreateGeneration(dev,ParentLatest)", "ActivateGeneration(dev,2)", "DetachGeneration(dev,1,,true)"}) {
 		t.Errorf("calls %q", fp.callLog())
 	}
+	requireRequestID(t, fp, "r1", "CreateGeneration(dev", "Stop(dev)", "ActivateGeneration(dev", "Start(dev)", "DetachGeneration(dev")
 	waitPhase(t, ns, "dev", v1alpha1.BranchRunning)
 }
 

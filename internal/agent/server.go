@@ -260,7 +260,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // logRequests logs one line per API request with its route, branch, status, duration and, for
-// a failed volume operation, the error (spec 11). 5xx lines are logged at level Error.
+// a failed volume operation, the error (spec 11), and the requestId of the X-Request-Id header
+// (empty when it is missing or not valid). 5xx lines are logged at level Error.
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -273,7 +274,11 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		if rec.status >= http.StatusInternalServerError {
 			level = slog.LevelError
 		}
-		attrs := []any{"op", rec.op, "branch", rec.branch, "status", rec.status, "durationMs", time.Since(start).Milliseconds()}
+		requestID := r.Header.Get(agentapi.RequestIDHeader)
+		if !agentapi.ValidRequestID(requestID) {
+			requestID = ""
+		}
+		attrs := []any{"op", rec.op, "branch", rec.branch, "requestId", requestID, "status", rec.status, "durationMs", time.Since(start).Milliseconds()}
 		if rec.err != nil {
 			attrs = append(attrs, "err", rec.err.Error())
 		}

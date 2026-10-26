@@ -1,6 +1,7 @@
 package agentapi_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -28,5 +29,22 @@ func TestValidRestorePointID(t *testing.T) {
 		if agentapi.ValidRestorePointID(id) {
 			t.Errorf("ValidRestorePointID(%q) = true", id)
 		}
+	}
+}
+
+func TestRequestIDInContext(t *testing.T) {
+	if id, ok := agentapi.RequestIDFrom(context.Background()); ok || id != "" {
+		t.Errorf("empty ctx: %q, %v", id, ok)
+	}
+	if id, ok := agentapi.RequestIDFrom(agentapi.WithRequestID(context.Background(), "r1")); !ok || id != "r1" {
+		t.Errorf("RequestIDFrom = %q, %v", id, ok)
+	}
+	for _, bad := range []string{"", "a b", "a\nb", "a/b", strings.Repeat("a", 65)} {
+		if id, ok := agentapi.RequestIDFrom(agentapi.WithRequestID(context.Background(), bad)); ok {
+			t.Errorf("RequestIDFrom accepted %q as %q", bad, id)
+		}
+	}
+	if !agentapi.ValidRequestID(strings.Repeat("a", 64)) || !agentapi.ValidRequestID("Req_1-x") {
+		t.Error("a valid id is rejected")
 	}
 }

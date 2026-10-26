@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"consonance/internal/agentapi"
 	"consonance/internal/pgctl"
 	"consonance/internal/supervisor"
 	"consonance/internal/supervisor/supervisortest"
@@ -76,5 +78,29 @@ func TestClientWrongTokenIsUnauthorized(t *testing.T) {
 	var apiErr *supervisorclient.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("Status with wrong token: err = %v, want 401 APIError", err)
+	}
+}
+
+func TestClientSendsTheRequestIDOfItsContext(t *testing.T) {
+	var got []string // the X-Request-Id of each call, "" when absent
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.Header.Get(agentapi.RequestIDHeader))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(srv.Close)
+	c := supervisorclient.New(srv.URL, "t0k", nil)
+
+	for _, ctx := range []context.Context{
+		agentapi.WithRequestID(context.Background(), "r1"),
+		context.Background(),
+		agentapi.WithRequestID(context.Background(), "bad id\nX-Evil: 1"), // never sent
+	} {
+		if _, err := c.Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if want := []string{"r1", "", ""}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("X-Request-Id of the calls = %q, want %q", got, want)
 	}
 }

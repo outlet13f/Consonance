@@ -51,6 +51,9 @@ func (r *BranchReconciler) restore(ctx context.Context, b *v1alpha1.Branch, agen
 		}
 	}
 	ctx = logf.IntoContext(ctx, logf.FromContext(ctx).WithValues("op", "restore", "requestId", lr.RequestID))
+	// Every call of the steps carries the request's id (the API server's spec.restore.requestId,
+	// copied to status), so the agent's and the supervisor's logs say which request they served.
+	ctx = agentapi.WithRequestID(ctx, lr.RequestID)
 	steps := map[v1alpha1.RestorePhase]step{
 		v1alpha1.RestorePreparing:  r.restorePrepare,
 		v1alpha1.RestoreStopping:   r.restoreStop,

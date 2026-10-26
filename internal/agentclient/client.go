@@ -156,6 +156,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return err
 	}
 	req.Header.Set(agentapi.TokenHeader, c.token)
+	if id, ok := agentapi.RequestIDFrom(ctx); ok {
+		req.Header.Set(agentapi.RequestIDHeader, id)
+	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

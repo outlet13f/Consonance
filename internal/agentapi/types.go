@@ -2,6 +2,7 @@
 package agentapi
 
 import (
+	"context"
 	"regexp"
 	"time"
 )
@@ -9,6 +10,10 @@ import (
 const (
 	// TokenHeader carries the project's internal token, the same one the supervisors use.
 	TokenHeader = "X-Consonance-Token"
+	// RequestIDHeader carries the id of the API request behind a call (a rollback's or reset's
+	// requestId). The agent and the supervisors log it as requestId. The supervisors share this
+	// header and the helpers below, so one ctx serves calls to both.
+	RequestIDHeader = "X-Request-Id"
 	// DefaultPort is the agent API port.
 	DefaultPort = 8443
 	// MainBranch is the project's first branch. Only POST /v1/init-main makes its data.
@@ -19,6 +24,35 @@ var (
 	branchNameRE     = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 	restorePointIDRE = regexp.MustCompile(`^rp-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{4}$`)
 )
+
+type requestIDKey struct{}
+
+// WithRequestID returns a ctx whose agent and supervisor client calls carry id as X-Request-Id.
+// An id that ValidRequestID rejects is never sent.
+func WithRequestID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, requestIDKey{}, id)
+}
+
+// RequestIDFrom returns the id WithRequestID put in ctx, if there is one and it is valid.
+func RequestIDFrom(ctx context.Context) (string, bool) {
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id, ValidRequestID(id)
+}
+
+// ValidRequestID accepts 1 to 64 letters, digits, '-' and '_' (the rule of the API server's
+// request ids), so a value cannot forge a log line or a header.
+func ValidRequestID(id string) bool {
+	if id == "" || len(id) > 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
 
 // ValidBranchName reports whether name is a DNS-1123 label of at most 40 characters (spec 4.3).
 func ValidBranchName(name string) bool {

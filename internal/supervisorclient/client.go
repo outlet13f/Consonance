@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"consonance/internal/agentapi"
 	"consonance/internal/supervisorapi"
 )
 
@@ -96,6 +97,10 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return err
 	}
 	req.Header.Set(supervisorapi.TokenHeader, c.token)
+	// The id helpers live in agentapi so that one ctx serves the agent's and the supervisor's calls.
+	if id, ok := agentapi.RequestIDFrom(ctx); ok {
+		req.Header.Set(agentapi.RequestIDHeader, id)
+	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

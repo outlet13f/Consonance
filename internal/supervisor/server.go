@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
+	"consonance/internal/agentapi"
 	"consonance/internal/pgctl"
 	"consonance/internal/supervisorapi"
 )
@@ -30,8 +32,10 @@ type Backups interface {
 }
 
 // Server serves the supervisor API. Build it as a plain struct literal; the unexported
-// fields are ready to use at their zero value.
+// fields are ready to use at their zero value. Log gets one line per /v1 request; nil means
+// slog.Default() at the time of the request.
 type Server struct {
+	Log          *slog.Logger
 	Token        string
 	PG           Postgres
 	Backups      Backups
@@ -41,6 +45,13 @@ type Server struct {
 	StartTimeout time.Duration
 
 	bootstrapMu sync.Mutex // one Bootstrap call at a time
+}
+
+func (s *Server) logger() *slog.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	return slog.Default()
 }
 
 // Handler returns the HTTP handler. /healthz and /readyz need no token.
@@ -54,11 +65,54 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/backup/start", s.auth(s.backupStart))
 	mux.Handle("POST /v1/backup/stop", s.auth(s.backupStop))
 	mux.Handle("POST /v1/bootstrap", s.auth(s.bootstrap))
-	return mux
+	return s.logRequests(mux)
+}
+
+// logRequests logs one line per /v1 request with its route, status, duration, the error of a
+// failed one and the requestId of the X-Request-Id header (empty when it is missing or not
+// valid), so a rollback can be followed from the operator into the supervisor. The probes are
+// not logged. 5xx lines are logged at level Error.
+func (s *Server) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		if rec.op == "" { // /healthz, /readyz, a path that is no route
+			return
+		}
+		level := slog.LevelInfo
+		if rec.status >= http.StatusInternalServerError {
+			level = slog.LevelError
+		}
+		requestID := r.Header.Get(agentapi.RequestIDHeader)
+		if !agentapi.ValidRequestID(requestID) {
+			requestID = ""
+		}
+		attrs := []any{"op", rec.op, "requestId", requestID, "status", rec.status, "durationMs", time.Since(start).Milliseconds()}
+		if rec.err != "" {
+			attrs = append(attrs, "err", rec.err)
+		}
+		s.logger().Log(r.Context(), level, "request", attrs...)
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+	op     string // the route pattern, set by auth
+	err    string // the message of the error response, if any
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rec, ok := w.(*statusRecorder); ok { // r is the routed request here
+			rec.op = r.Pattern
+		}
 		got := r.Header.Get(supervisorapi.TokenHeader)
 		if s.Token == "" || subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
 			writeError(w, http.StatusUnauthorized, "invalid token")
@@ -179,5 +233,8 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {
+	if rec, ok := w.(*statusRecorder); ok {
+		rec.err = msg
+	}
 	writeJSON(w, code, supervisorapi.Error{Error: msg})
 }
