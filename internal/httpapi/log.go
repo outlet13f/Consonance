@@ -17,6 +17,9 @@ type reqState struct {
 	id    string // the request id, fixed when the request starts
 	op    string
 	attrs []any
+	// failed makes the line Error whatever the status: a panic after the response began leaves a
+	// 200 or 4xx status that does not say the request broke.
+	failed bool
 }
 
 type reqStateKey struct{}
@@ -41,6 +44,15 @@ func logAttrs(ctx context.Context, kv ...any) {
 	if st := stateOf(ctx); st != nil {
 		st.mu.Lock()
 		st.attrs = append(st.attrs, kv...)
+		st.mu.Unlock()
+	}
+}
+
+// logFailed puts the request's log line at level Error. Outside a request it does nothing.
+func logFailed(ctx context.Context) {
+	if st := stateOf(ctx); st != nil {
+		st.mu.Lock()
+		st.failed = true
 		st.mu.Unlock()
 	}
 }
@@ -96,6 +108,9 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+// started reports whether the response has begun: its status is sent and cannot change.
+func (w *statusWriter) started() bool { return w.status != 0 }
+
 // Unwrap lets http.ResponseController reach the real writer.
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
@@ -128,7 +143,7 @@ func (s *server) logged(next http.Handler) http.Handler {
 			"durationMs", time.Since(start).Milliseconds(),
 		}, st.attrs...)
 		level := slog.LevelInfo
-		if status >= 500 {
+		if status >= 500 || st.failed {
 			level = slog.LevelError
 		}
 		s.log.Log(r.Context(), level, "request", attrs...)

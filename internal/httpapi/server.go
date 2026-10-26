@@ -164,8 +164,9 @@ func (s *server) handler(eps []endpoint) http.Handler {
 
 // recovered turns a panic of next into a 500 problem, and puts the panic and its stack into
 // the request's log line, which is at level Error for a 500: net/http would print the stack to
-// stderr outside the JSON log and drop the connection. http.ErrAbortHandler is the panic that
-// asks for the drop, so it goes on up.
+// stderr outside the JSON log and drop the connection. If the handler had already begun the
+// response, a problem would be glued to its body under its status, so the panic is only logged,
+// at level Error. http.ErrAbortHandler is the panic that asks for the drop, so it goes on up.
 func recovered(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -177,6 +178,10 @@ func recovered(next http.Handler) http.Handler {
 				panic(v)
 			}
 			logAttrs(r.Context(), "panic", fmt.Sprint(v), "stack", string(debug.Stack()))
+			if sw, ok := w.(*statusWriter); ok && sw.started() {
+				logFailed(r.Context())
+				return
+			}
 			writeProblem(w, r, internal(errors.New("internal error")))
 		}()
 		next.ServeHTTP(w, r)

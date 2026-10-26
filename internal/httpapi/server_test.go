@@ -323,3 +323,28 @@ func TestDefaultWaits(t *testing.T) {
 		t.Errorf("partly set Waits = %+v", got)
 	}
 }
+
+// A panic after the handler began the response must not append a problem to it: the status and
+// the bytes are gone, so the panic is only logged, at level Error although the status is 200.
+func TestPanicAfterTheResponseStartedIsOnlyLogged(t *testing.T) {
+	var buf syncBuffer
+	cfg, _, _ := testConfig()
+	cfg.Log = slog.New(slog.NewJSONHandler(&buf, nil))
+	srv := newServerWithRoutes(t, cfg, endpoint{route{http.MethodGet, "/v1/halfway", "test.halfway"}, func(w http.ResponseWriter, r *http.Request) error {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("partial"))
+		panic("after the first byte")
+	}})
+	resp, body := call(t, srv, http.MethodGet, "/v1/halfway", nil)
+	if resp.StatusCode != http.StatusOK || string(body) != "partial" {
+		t.Errorf("response = %d %q, want the 200 and body the handler wrote, with no problem added", resp.StatusCode, body)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/plain" {
+		t.Errorf("Content-Type = %q, want text/plain", ct)
+	}
+	rec := firstLogLine(t, &buf)
+	if p, _ := rec["panic"].(string); !strings.Contains(p, "after the first byte") || rec["level"] != "ERROR" || rec["status"] != float64(200) {
+		t.Errorf("log line = %v, want the panic at level ERROR with status 200", rec)
+	}
+}
