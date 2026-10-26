@@ -5,6 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/workqueue"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -30,6 +31,7 @@ func CacheOptions() cache.Options {
 		&corev1.PersistentVolumeClaim{}: {Label: mine},
 		&corev1.ResourceQuota{}:         {Label: mine},
 		&networkingv1.NetworkPolicy{}:   {Label: mine},
+		&rbacv1.RoleBinding{}:           {Label: mine},
 	}}
 }
 

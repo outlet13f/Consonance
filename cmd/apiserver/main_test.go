@@ -45,32 +45,66 @@ func buildAPIServer(t *testing.T) string {
 	return out
 }
 
-// apiServerUser is an API server user bound to the ClusterRole that make generate writes, and its
-// kubeconfig: the API server runs with exactly the permissions it will have in a cluster.
-func apiServerUser(t *testing.T) string {
+// readYAMLDocs reads the documents of a file under the repository root into objs, each by its
+// position.
+func readYAMLDocs(t *testing.T, rel string, objs ...client.Object) {
 	t.Helper()
-	ctx := context.Background()
-	b, err := os.ReadFile(filepath.Join(kubetest.RepoRoot(), "config", "rbac", "apiserver", "role.yaml"))
+	b, err := os.ReadFile(filepath.Join(kubetest.RepoRoot(), filepath.FromSlash(rel)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var role rbacv1.ClusterRole
-	if err := yaml.Unmarshal(b, &role); err != nil {
-		t.Fatal(err)
+	docs := strings.Split(string(b), "\n---\n")
+	if len(docs) != len(objs) {
+		t.Fatalf("%s has %d documents, want %d", rel, len(docs), len(objs))
 	}
-	if err := env.Client.Create(ctx, &role); err != nil {
-		t.Fatal(err)
+	for i, obj := range objs {
+		if err := yaml.Unmarshal([]byte(docs[i]), obj); err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
 	}
-	t.Cleanup(func() { _ = env.Client.Delete(context.Background(), &role) })
+}
+
+// installAPIServerRoles creates the two ClusterRoles of the API server, as make generate and the
+// manifests write them: consonance-apiserver and consonance-apiserver-project. It returns the
+// first, the one bound cluster-wide.
+func installAPIServerRoles(t *testing.T) *rbacv1.ClusterRole {
+	t.Helper()
+	var role, projectRole rbacv1.ClusterRole
+	readYAMLDocs(t, "config/rbac/apiserver/role.yaml", &role)
+	readYAMLDocs(t, "config/rbac/apiserver/project-role.yaml", &projectRole)
+	if projectRole.Name != controller.APIServerProjectRole {
+		t.Fatalf("project-role.yaml is ClusterRole %q, want %q", projectRole.Name, controller.APIServerProjectRole)
+	}
+	for _, r := range []*rbacv1.ClusterRole{&role, &projectRole} {
+		if err := env.Client.Create(context.Background(), r); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = env.Client.Delete(context.Background(), r) })
+	}
+	return &role
+}
+
+// bindClusterRole binds role cluster-wide to a subject.
+func bindClusterRole(t *testing.T, role *rbacv1.ClusterRole, subject rbacv1.Subject) {
+	t.Helper()
 	binding := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: role.Name},
+		ObjectMeta: metav1.ObjectMeta{Name: role.Name + "-" + subject.Name},
 		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: role.Name},
-		Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: "consonance-apiserver"}},
+		Subjects:   []rbacv1.Subject{subject},
 	}
-	if err := env.Client.Create(ctx, binding); err != nil {
+	if err := env.Client.Create(context.Background(), binding); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = env.Client.Delete(context.Background(), binding) })
+}
+
+// apiServerUser is an API server user bound to the ClusterRole that make generate writes, and its
+// kubeconfig: the API server runs with exactly the permissions it will have in a cluster. Secrets
+// are not among them: a project namespace needs givesSecrets, which the operator does in a cluster.
+func apiServerUser(t *testing.T) string {
+	t.Helper()
+	role := installAPIServerRoles(t)
+	bindClusterRole(t, role, rbacv1.Subject{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: "consonance-apiserver"})
 	kubeconfig, err := env.AddUser("consonance-apiserver")
 	if err != nil {
 		t.Fatal(err)
@@ -80,6 +114,20 @@ func apiServerUser(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// givesSecrets does for a project namespace what the operator does: a RoleBinding of the API
+// server's user to the project ClusterRole, which reads db-credentials and internal-token.
+func givesSecrets(t *testing.T, ns string) {
+	t.Helper()
+	rb := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: controller.APIServerAccount, Namespace: ns},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: controller.APIServerProjectRole},
+		Subjects:   []rbacv1.Subject{{APIGroup: rbacv1.GroupName, Kind: rbacv1.UserKind, Name: "consonance-apiserver"}},
+	}
+	if err := env.Client.Create(context.Background(), rb); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeKey(t *testing.T, content string) string {
@@ -209,6 +257,7 @@ func TestAPIServerWithItsOwnPermissions(t *testing.T) {
 	if err := env.Client.Get(ctx, client.ObjectKey{Name: ns}, &gotNS); err != nil {
 		t.Fatal(err)
 	}
+	givesSecrets(t, ns) // the operator does it in a cluster; there is none here
 	if gotNS.Labels[controller.LabelManagedBy] != "consonance-apiserver" || gotNS.Labels["pod-security.kubernetes.io/enforce"] != "restricted" {
 		t.Errorf("namespace labels %v", gotNS.Labels)
 	}

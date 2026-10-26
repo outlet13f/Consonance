@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -48,6 +49,12 @@ const (
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update
+//
+// The API server's RoleBinding to ClusterRole consonance-apiserver-project is kept like the
+// policies. Kubernetes lets the operator bind a role it does not hold itself only with `bind` on
+// that role, which it has for this one role by name.
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=bind,resourceNames=consonance-apiserver-project
 
 // ProjectReconciler carries out spec 7.1's Project steps.
 type ProjectReconciler struct {
@@ -67,6 +74,7 @@ func (r *ProjectReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ResourceQuota{}).
 		Owns(&networkingv1.NetworkPolicy{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Watches(&corev1.PersistentVolumeClaim{}, handler.EnqueueRequestsFromMapFunc(projectOf)).
 		Watches(&v1alpha1.Branch{}, handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, o client.Object) []reconcile.Request {
 			if o.GetName() != v1alpha1.MainBranch {
@@ -116,7 +124,7 @@ func (r *ProjectReconciler) reconcile(ctx context.Context, p *v1alpha1.Project) 
 		return ctrl.Result{}, nil // summarize reports it; nothing else is made
 	}
 
-	// Step 1: secrets, network policies, quota.
+	// Step 1: secrets, network policies, quota, and the API server's right to the two secrets.
 	if _, err := r.ensureSecret(ctx, newDBCredentialsSecret, p.Namespace); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -136,6 +144,14 @@ func (r *ProjectReconciler) reconcile(ctx context.Context, p *v1alpha1.Project) 
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+	wantAccess := desiredAPIServerRoleBinding(p.Namespace)
+	access := &rbacv1.RoleBinding{ObjectMeta: metav1.ObjectMeta{Name: wantAccess.Name, Namespace: wantAccess.Namespace}}
+	if _, err := controllerutil.CreateOrUpdate(ctx, r.Client, access, func() error {
+		access.Labels, access.RoleRef, access.Subjects = wantAccess.Labels, wantAccess.RoleRef, wantAccess.Subjects
+		return controllerutil.SetControllerReference(p, access, r.Scheme)
+	}); err != nil {
+		return ctrl.Result{}, err
 	}
 	wantQuota := desiredQuota(p)
 	quota := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: wantQuota.Name, Namespace: wantQuota.Namespace}}

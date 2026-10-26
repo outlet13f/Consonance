@@ -1,0 +1,32 @@
+# The API server may delete only the namespaces it made: those labelled
+# app.kubernetes.io/managed-by=consonance-apiserver (internal/httpapi makes them with it). Its
+# ClusterRole has `delete` on namespaces, which RBAC cannot narrow by label; this policy does,
+# for that one account. Everyone else is untouched.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: consonance-apiserver-namespace-delete
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["DELETE"]
+      resources: ["namespaces"]
+  validations:
+  - expression: >-
+      request.userInfo.username != 'system:serviceaccount:consonance-system:consonance-apiserver' ||
+      (has(oldObject.metadata.labels) &&
+       'app.kubernetes.io/managed-by' in oldObject.metadata.labels &&
+       oldObject.metadata.labels['app.kubernetes.io/managed-by'] == 'consonance-apiserver')
+    message: the API server may only delete namespaces it made (label app.kubernetes.io/managed-by=consonance-apiserver)
+    reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: consonance-apiserver-namespace-delete
+spec:
+  policyName: consonance-apiserver-namespace-delete
+  validationActions: [Deny]

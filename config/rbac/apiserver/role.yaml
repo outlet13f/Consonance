@@ -13,12 +13,6 @@ rules:
   - delete
   - get
 - apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-- apiGroups:
   - consonance.io
   resources:
   - branches

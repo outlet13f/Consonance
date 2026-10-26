@@ -100,6 +100,22 @@ func operatorUser(t *testing.T) string {
 	if err := env.Client.Create(ctx, &cr); err != nil {
 		t.Fatal(err)
 	}
+	// The ClusterRole the operator binds the API server to. `bind` lets it make the binding
+	// whether or not the role exists; the role is applied so the cluster is as in production.
+	pb, err := os.ReadFile(filepath.Join(kubetest.RepoRoot(), "config", "rbac", "apiserver", "project-role.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectRole rbacv1.ClusterRole
+	if err := yaml.Unmarshal(pb, &projectRole); err != nil {
+		t.Fatal(err)
+	}
+	if projectRole.Name != controller.APIServerProjectRole {
+		t.Fatalf("project-role.yaml is ClusterRole %q, want %q", projectRole.Name, controller.APIServerProjectRole)
+	}
+	if err := env.Client.Create(ctx, &projectRole); err != nil {
+		t.Fatal(err)
+	}
 	if err := env.Client.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: systemNamespace}}); err != nil && !apierrors.IsAlreadyExists(err) {
 		t.Fatal(err)
 	}
@@ -146,6 +162,8 @@ func TestOperatorRoleHasOnlyWhatItUses(t *testing.T) {
 		"resourcequotas":         {"patch", "delete"},
 		"networkpolicies":        {"patch", "delete"},
 		"branches":               {"patch", "delete"},
+		"rolebindings":           {"patch", "delete"},
+		"clusterroles":           {"*", "get", "list", "watch", "create", "update", "patch", "delete", "escalate"},
 		"branches/status":        {"get", "patch"},
 		"projects/status":        {"get", "patch"},
 		"leases":                 {"*", "get", "list", "watch", "create", "update", "patch", "delete"},
@@ -179,11 +197,19 @@ func TestOperatorRoleHasOnlyWhatItUses(t *testing.T) {
 		"resourcequotas": {"get", "list", "watch", "create", "update"}, "networkpolicies": {"get", "list", "watch", "create", "update"},
 		"branches": {"get", "list", "watch", "create", "update"}, "branches/status": {"update"}, "projects/status": {"update"},
 		"branches/finalizers": {"update"}, "projects/finalizers": {"update"}, "projects": {"get", "list", "watch"},
+		"rolebindings": {"get", "list", "watch", "create", "update"}, "clusterroles": {"bind"},
 	} {
 		for _, v := range verbs {
 			if !granted[res][v] {
 				t.Errorf("the ClusterRole lacks %s on %s", v, res)
 			}
+		}
+	}
+	// `bind` is for the API server's project role alone, by name: it must not let the operator
+	// hand out any other ClusterRole.
+	for _, rule := range cr.Rules {
+		if slices.Contains(rule.Resources, "clusterroles") && !slices.Equal(rule.ResourceNames, []string{controller.APIServerProjectRole}) {
+			t.Errorf("the ClusterRole grants %v on clusterroles to %v, want only %s", rule.Verbs, rule.ResourceNames, controller.APIServerProjectRole)
 		}
 	}
 	if role.Namespace != systemNamespace {
@@ -224,6 +250,16 @@ func TestOperatorReconcilesWithItsOwnPermissions(t *testing.T) {
 	}
 	if err := as.List(ctx, &corev1.NamespaceList{}); !apierrors.IsForbidden(err) {
 		t.Fatalf("listing namespaces as the operator: %v, want Forbidden", err)
+	}
+	// It may bind the API server's project role and no other: a binding to cluster-admin is
+	// refused as an escalation.
+	escalate := &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "escalate", Namespace: env.Namespace(t)},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: "cluster-admin"},
+		Subjects:   []rbacv1.Subject{{Kind: rbacv1.ServiceAccountKind, Name: "x", Namespace: "default"}},
+	}
+	if err := as.Create(ctx, escalate); !apierrors.IsForbidden(err) {
+		t.Fatalf("binding cluster-admin as the operator: %v, want Forbidden", err)
 	}
 	probe := fmt.Sprintf("127.0.0.1:%d", pgtest.FreePort(t))
 	logPath := filepath.Join(t.TempDir(), "operator.log")
@@ -294,6 +330,14 @@ func TestOperatorReconcilesWithItsOwnPermissions(t *testing.T) {
 		if err := env.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, obj); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	// The API server's RoleBinding to the project role (rolebindings create, clusterroles bind).
+	var access rbacv1.RoleBinding
+	if err := env.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: controller.APIServerAccount}, &access); err != nil {
+		t.Errorf("the API server's RoleBinding: %v", err)
+	} else if access.RoleRef.Name != controller.APIServerProjectRole || len(access.Subjects) != 1 ||
+		access.Subjects[0].Name != controller.APIServerAccount || access.Subjects[0].Namespace != systemNamespace {
+		t.Errorf("RoleBinding roleRef %+v subjects %+v", access.RoleRef, access.Subjects)
 	}
 	var pod corev1.Pod
 	if err := env.Client.Get(ctx, client.ObjectKey{Namespace: ns, Name: controller.AgentName}, &pod); err == nil && pod.Spec.Containers[0].Image != "consonance/agent:test" {

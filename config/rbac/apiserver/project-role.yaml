@@ -1,0 +1,20 @@
+# What the API server may do in a project namespace: read db-credentials (for a connection string)
+# and internal-token. The operator binds it to the API server's service account with a RoleBinding
+# in each project namespace (internal/controller/apiserver_access.go), so the API server has no
+# right to read other secrets. The operator may create those bindings through `bind` on this role
+# (config/rbac/role.yaml). Written by hand: controller-gen does not render resourceNames per
+# namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: consonance-apiserver-project
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  resourceNames:
+  - db-credentials
+  - internal-token
+  verbs:
+  - get

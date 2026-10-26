@@ -58,6 +58,14 @@ const (
 	APIServerAppName = "consonance-apiserver"
 )
 
+// The API server's service account in the system namespace, and the ClusterRole that each project
+// namespace binds it to (desiredAPIServerRoleBinding). The RoleBinding in a project namespace has
+// the account's name too.
+const (
+	APIServerAccount     = "consonance-apiserver"
+	APIServerProjectRole = "consonance-apiserver-project"
+)
+
 // BranchObjectName is the name of a branch's pod and service: br-<branch>.
 func BranchObjectName(branch string) string { return "br-" + branch }
 
