@@ -289,3 +289,20 @@ func TestProjectOutsideAProjectNamespaceFails(t *testing.T) {
 		t.Errorf("secret in a plain namespace: %v", err)
 	}
 }
+
+// A status update that conflicts must not leave the project unsaved until the next usage refresh
+// a minute later: the Project watch ignores status-only events, so nothing else brings it back.
+func TestProjectStatusConflictIsRetriedSoon(t *testing.T) {
+	ns, _ := createProject(t, nil)
+	conflictReady.Store(ns, true) // the update that makes it Ready conflicts, once
+	bindVolume(t, ns)
+	eventually(t, 5*time.Second, func() string {
+		if p := getProject(t, ns); p.Status.Phase != v1alpha1.ProjectReady {
+			return fmt.Sprintf("phase %s, a minute (usageEvery) is too long to wait", p.Status.Phase)
+		}
+		return ""
+	})
+	if _, still := conflictReady.Load(ns); still {
+		t.Error("the update never conflicted: the test did not test what it says")
+	}
+}

@@ -99,6 +99,8 @@ func (r *BranchReconciler) recorded(b *v1alpha1.Branch) {
 
 // saved observes the timings that b's status, which the API server now has, records for the first
 // time (spec 11). main's data time is left out: its init-main belongs to the project's creation.
+// Backup branches are left out of both: the operator makes them in a rollback, and their
+// near-zero times would skew what a user's branch takes.
 func (r *BranchReconciler) saved(b *v1alpha1.Branch) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -107,17 +109,20 @@ func (r *BranchReconciler) saved(b *v1alpha1.Branch) {
 	if !ok {
 		return // everything was recorded already
 	}
+	_, backup := b.Labels[LabelBackupOf]
 	t := b.Status.Timings
 	created := b.CreationTimestamp.Time
 	if t.DataReadyAt != nil && !was.dataReady {
 		was.dataReady = true
-		if !isMain(b) {
+		if !isMain(b) && !backup {
 			observe(branchCreateSeconds, t.DataReadyAt.Sub(created))
 		}
 	}
 	if t.RunningAt != nil && !was.running {
 		was.running = true
-		observe(branchFirstReadySeconds, t.RunningAt.Sub(created))
+		if !backup {
+			observe(branchFirstReadySeconds, t.RunningAt.Sub(created))
+		}
 	}
 	r.timed[key] = was
 }

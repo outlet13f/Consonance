@@ -139,7 +139,7 @@ func TestRestoreMetrics(t *testing.T) {
 	requestRestore(t, ns, "dev", "r1", v1alpha1.BranchSource{Type: v1alpha1.SourceRestorePoint, RestorePointID: testRP})
 	waitRestore(t, ns, "dev", "r1", v1alpha1.RestoreDone)
 	want.rollbackDone++
-	want.create++ // the backup branch's data is found, which is its data being ready
+	// The backup branch the rollback makes is left out of branch_create and first_ready.
 	expect(t, want)
 
 	requestRestore(t, ns, "dev", "r2", v1alpha1.BranchSource{Type: v1alpha1.SourceParentLatest})
@@ -179,5 +179,22 @@ func TestCopyErrorsAreCountedByReason(t *testing.T) {
 	waitRestore(t, ns, "dev", "r1", v1alpha1.RestoreDone)
 	if got := copyErrorCount("rate-limited") - limited; got != 2 {
 		t.Errorf("rate-limited %v more, want 2", got)
+	}
+}
+
+func TestCopyErrorReason(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&agentclient.APIError{StatusCode: 429, Code: agentapi.CodeRateLimited}, "rate-limited"},
+		{&agentclient.APIError{StatusCode: 507, Code: agentapi.CodeInsufficientStorage}, "insufficient-storage"},
+		{fmt.Errorf("wrapped: %w", &agentclient.APIError{StatusCode: 500, Code: agentapi.CodeInternal}), "internal"},
+		{&agentclient.APIError{StatusCode: 418, Code: "teapot"}, "other"}, // a code this operator does not know
+		{errors.New("connection reset"), "transport"},                     // no agent answered
+	} {
+		if got := copyErrorReason(c.err); got != c.want {
+			t.Errorf("%v: reason %q, want %q", c.err, got, c.want)
+		}
 	}
 }

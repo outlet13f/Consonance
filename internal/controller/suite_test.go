@@ -2,9 +2,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -28,6 +31,10 @@ var (
 	kenv *kubetest.Env
 	conn *fakeConnector
 )
+
+// conflictReady makes the first status update that makes a project Ready fail with a conflict,
+// as if the cache were stale: namespace -> armed. See TestProjectStatusConflictIsRetriedSoon.
+var conflictReady sync.Map
 
 const (
 	testAgentImage    = "consonance/agent:test"
@@ -73,7 +80,7 @@ func startManager(e *kubetest.Env) (stop func(), err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := (&ProjectReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Connector: conn, AgentImage: testAgentImage}).SetupWithManager(mgr); err != nil {
+	if err := (&ProjectReconciler{Client: projectConflicts{Client: mgr.GetClient()}, Scheme: mgr.GetScheme(), Connector: conn, AgentImage: testAgentImage}).SetupWithManager(mgr); err != nil {
 		return nil, err
 	}
 	if err := (&BranchReconciler{Client: mgr.GetClient(), Scheme: mgr.GetScheme(), Connector: conn, PostgresImage: testPostgresImage}).SetupWithManager(mgr); err != nil {
@@ -195,4 +202,24 @@ func ignoreExists(err error) error {
 		return nil
 	}
 	return err
+}
+
+// projectConflicts is the Project reconciler's client, with a status update that conflicts once
+// where a test asks for it (conflictReady).
+type projectConflicts struct{ client.Client }
+
+func (c projectConflicts) Status() client.SubResourceWriter {
+	return conflictingStatus{SubResourceWriter: c.Client.Status()}
+}
+
+type conflictingStatus struct{ client.SubResourceWriter }
+
+func (w conflictingStatus) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if p, ok := obj.(*v1alpha1.Project); ok && p.Status.Phase == v1alpha1.ProjectReady {
+		if _, armed := conflictReady.LoadAndDelete(p.Namespace); armed {
+			return apierrors.NewConflict(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "projects"}, p.Name,
+				errors.New("the object has been modified; please apply your changes to the latest version and try again"))
+		}
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }

@@ -7,6 +7,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"consonance/api/v1alpha1"
+	"consonance/internal/agentapi"
 )
 
 // The operator's metrics (spec 11). The operator sees every object's lifetime, so it times them
@@ -18,12 +19,12 @@ var (
 
 	branchCreateSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "consonance_branch_create_seconds",
-		Help:    "Time from a Branch's creation until its data exists. main is left out: its init-main is part of the project's creation.",
+		Help:    "Time from a Branch's creation until its data exists. main is left out (its init-main is part of the project's creation), and so are the backup branches a rollback makes.",
 		Buckets: buckets,
 	})
 	branchFirstReadySeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "consonance_branch_first_ready_seconds",
-		Help:    "Time from a Branch's creation until PostgreSQL first runs.",
+		Help:    "Time from a Branch's creation until PostgreSQL first runs. Backup branches are left out.",
 		Buckets: buckets,
 	})
 	restoreSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -43,7 +44,7 @@ var (
 	})
 	copyErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "consonance_copy_errors_total",
-		Help: "Failed data copies (CreateBranchData, CreateGeneration), by the agent's error code, or transport when none answered.",
+		Help: "Failed data copies (CreateBranchData, CreateGeneration), by the agent's error code, transport when none answered, other for a code not known.",
 	}, []string{"reason"})
 )
 
@@ -52,15 +53,30 @@ func init() {
 		startSeconds, projectCreateSeconds, copyErrors)
 }
 
-// countCopyError counts a failed copy by the agent's error code; an error with none (the agent
-// did not answer) is a transport error.
-func countCopyError(err error) {
-	reason := string(agentCode(err))
-	if reason == "" {
-		reason = "transport"
-	}
-	copyErrors.WithLabelValues(reason).Inc()
+// copyErrorReasons are the agent's error codes. Any other code, which a newer agent may send,
+// is counted as "other", so the label stays a small fixed set.
+var copyErrorReasons = map[agentapi.ErrorCode]bool{
+	agentapi.CodeInvalid: true, agentapi.CodeUnauthorized: true, agentapi.CodeNotFound: true,
+	agentapi.CodeConflict: true, agentapi.CodeNotRunning: true, agentapi.CodeBusy: true,
+	agentapi.CodeRateLimited: true, agentapi.CodeSupervisorUnavailable: true,
+	agentapi.CodeInsufficientStorage: true, agentapi.CodeReflinkUnsupported: true, agentapi.CodeInternal: true,
 }
+
+// copyErrorReason is the label of a failed copy: the agent's error code, "transport" when there is
+// none (the agent did not answer), "other" for a code not known.
+func copyErrorReason(err error) string {
+	code := agentCode(err)
+	switch {
+	case code == "":
+		return "transport"
+	case copyErrorReasons[code]:
+		return string(code)
+	}
+	return "other"
+}
+
+// countCopyError counts a failed copy by its reason.
+func countCopyError(err error) { copyErrors.WithLabelValues(copyErrorReason(err)).Inc() }
 
 // observe records d, which a clock that stepped back may make negative, as a duration of 0 or more.
 func observe(h prometheus.Observer, d time.Duration) { h.Observe(max(d, 0).Seconds()) }

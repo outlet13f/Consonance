@@ -33,6 +33,8 @@ const (
 	bootstrapTimeout = 30 * time.Second
 	// usageEvery is how often a ready project's volume usage is refreshed.
 	usageEvery = time.Minute
+	// conflictRetry is how soon a project is looked at again after its status update conflicted.
+	conflictRetry = 100 * time.Millisecond
 )
 
 // The Project reconcile's permissions (config/rbac/role.yaml, make generate).
@@ -155,7 +157,13 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !equality.Semantic.DeepEqual(*before, p.Status) {
 		if uerr := r.Status().Update(ctx, &p); uerr != nil {
 			if apierrors.IsConflict(uerr) {
-				return res, err // a newer version exists, and its update event brings the project back
+				if err != nil {
+					return res, err // the error's own retry brings the project back
+				}
+				// A newer version exists, but its update event does not bring the project back:
+				// the watch ignores status-only changes (GenerationChangedPredicate). Without this
+				// the status stays unsaved until res asks for a look, a minute (usageEvery) later.
+				return ctrl.Result{RequeueAfter: conflictRetry}, nil
 			}
 			return ctrl.Result{}, errors.Join(err, uerr)
 		}
