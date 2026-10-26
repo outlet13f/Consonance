@@ -128,7 +128,7 @@ func TestCloneTreeManyFiles(t *testing.T) {
 }
 
 func TestCloneTreeWithoutReflinkFails(t *testing.T) {
-	// t.TempDir is not XFS: ext4 in the Lima VM, APFS on a Mac.
+	// t.TempDir is not XFS: ext4 or overlayfs in the test container, APFS on a Mac.
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "a"), "data", 0o600)
 	err := volume.CloneTree(src, t.TempDir(), nil)

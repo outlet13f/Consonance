@@ -1,4 +1,4 @@
-.PHONY: test test-vm test-xfs vm-setup images image-postgres smoke-postgres image-agent smoke-agent generate envtest test-envtest
+.PHONY: test test-pg test-xfs images image-postgres smoke-postgres image-agent smoke-agent generate envtest test-envtest
 
 CONTROLLER_GEN = go run sigs.k8s.io/controller-tools/cmd/controller-gen@v0.22.0
 SETUP_ENVTEST = go run sigs.k8s.io/controller-runtime/tools/setup-envtest@v0.25.2
@@ -20,14 +20,11 @@ envtest: ## download the envtest API server and etcd into bin/envtest
 test-envtest: envtest ## host tests with a Kubernetes API server (envtest) for the API types and the operator
 	KUBEBUILDER_ASSETS="$$($(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(CURDIR)/bin/envtest -p path)" go test ./...
 
-vm-setup: ## one-time: start the Lima VM, install Go and PostgreSQL 17, mount the XFS test volume
-	hack/vm-setup.sh
+test-pg: ## all tests in a container on the Podman machine, with PostgreSQL 17 and XFS (envtest packages skip)
+	hack/pg-test.sh ./...
 
-test-vm: ## all tests inside the Lima VM
-	hack/vm-test.sh ./...
-
-test-xfs: ## internal/volume tests on XFS with reflink inside the Lima VM
-	hack/vm-test.sh -race ./internal/volume/... ./internal/testutil/xfstest/...
+test-xfs: ## internal/volume tests on XFS with reflink in a container on the Podman machine
+	hack/pg-test.sh -race -count=1 ./internal/volume/... ./internal/testutil/xfstest/...
 
 images: image-postgres image-agent ## build every image
 

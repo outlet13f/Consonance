@@ -7,7 +7,7 @@ import (
 )
 
 // EnvDir names the environment variable pointing at a writable directory on XFS with reflink
-// (spec 12). hack/vm-test.sh sets it inside the Lima VM.
+// (spec 12). hack/pg-test.sh sets it in the test container on the Podman machine.
 const EnvDir = "CONSONANCE_TEST_XFS_DIR"
 
 // Dir returns a fresh directory under $CONSONANCE_TEST_XFS_DIR, removed when the test ends,
