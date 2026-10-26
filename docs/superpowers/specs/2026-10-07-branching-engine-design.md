@@ -282,6 +282,10 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 4. `spec.restore.requestId`가 `status.lastRestore.requestId`와 다르면 9.4의 롤백·리셋 절차를 단계별로 진행하고, 단계마다 `status.lastRestore.phase`를 기록한다(중간에 오퍼레이터가 재시작해도 이어서 진행).
 5. 삭제 시 파이널라이저(`consonance.io/branch-cleanup`)에서 파드·Service를 지우고, 파드 객체가 사라진 뒤 에이전트 `DELETE /v1/branches/{name}/data`를 호출하고 파이널라이저를 뗀다. main의 데이터는 지우지 않고(Project 조정이 main Branch를 다시 만든다), Project가 없거나 삭제 중이면(네임스페이스 삭제가 볼륨을 가져간다), reflink 점검을 통과한 적이 없으면(데이터가 있을 수 없다) 에이전트를 부르지 않는다. main이 아닌 브랜치가 롤백의 Detaching 단계일 때 지워지면, 에이전트가 이미 옮긴 옛 데이터는 백업 브랜치 Branch를 만들어 남기고, 아직 옮기지 않았으면 브랜치와 함께 지운다.
 
+**배포**
+
+- 오퍼레이터는 `consonance-system`에서 복제본 1개를 `--leader-elect`로 띄우고 배포 전략은 `Recreate`다. 롤아웃 때 옛 파드가 멈춘 뒤 새 파드가 뜨고, 종료가 늦어 둘이 겹쳐도 리스를 쥔 쪽만 조정한다. 리스 권한은 `consonance-system`의 Role로 준다.
+
 ### 7.2 볼륨 에이전트 (`cmd/agent`, `internal/volume`)
 
 프로젝트당 파드 1개. 볼륨 루트를 `/volume`에 마운트한다. 내부 HTTP API(포트 8443, 헤더 `X-Consonance-Token`).
@@ -337,12 +341,13 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - 동기 응답이 필요한 요청은 해당 Branch status를 watch로 기다리고, 제한 시간(5장 표)을 넘으면 202와 현재 상태를 돌려준다.
 - 동기 대기는 캐시를 100ms마다 읽어 확인한다. 캐시는 watch로 채워지므로 쿠버네티스 API에 따로 부하를 주지 않는다.
 - Secret과 Namespace는 캐시하지 않고 클러스터에서 매번 읽는다.
+- Secret 접근은 클러스터 전체가 아니라 프로젝트별이다. 오퍼레이터가 프로젝트 네임스페이스마다 RoleBinding `consonance-apiserver`를 만들어 ClusterRole `consonance-apiserver-project`(Secret `get`, `resourceNames: [db-credentials, internal-token]`)를 서비스 계정 `consonance-system/consonance-apiserver`에 묶는다.
 - 종료할 때는 진행 중인 요청을 35초까지 기다린다.
 
 ### 7.5 파드 명세 공통
 
 - 모든 파드: `runAsNonRoot`, uid/gid 999, `allowPrivilegeEscalation: false`, capabilities 전부 제거, seccomp `RuntimeDefault` → 쿠버네티스 Pod Security Standard `restricted` 충족.
-- 에이전트 파드: `fsGroup: 999`, `fsGroupChangePolicy: OnRootMismatch`(대용량 볼륨에서 재귀 chown 방지). 자원 100m/128Mi.
+- 에이전트 파드: `fsGroup: 999`, `fsGroupChangePolicy: OnRootMismatch`(대용량 볼륨에서 재귀 chown 방지). 자원은 요청 CPU 100m·메모리 128Mi, 한도 CPU 1코어·메모리 128Mi다(QoS Burstable). CPU 한도를 요청과 같은 100m로 두면 1GB 복사의 CPU 0.11초가 스로틀링으로 0.86초쯤으로 늘어나 한 코어로 올렸다.
 - 브랜치 파드: 볼륨 subPath `branches/<name>` → `/pgdata`, emptyDir → `/var/run/postgresql`, Secret `internal-token`, main만 Secret `db-credentials`. 자원은 Branch compute.
 - 같은 PVC(RWO)를 쓰므로 브랜치 파드는 에이전트 파드와 같은 노드에 둔다(필수 podAffinity, `kubernetes.io/hostname`).
 - 에이전트 파드를 새로 만들 때 실행 중인 브랜치 파드가 있으면 그 노드에 둔다(필수 nodeAffinity, 노드 이름 `metadata.name`). 네트워크 RWO 볼륨은 붙어 있는 노드를 떠날 수 없다. 그 노드에 실행 중인 브랜치 파드가 더 없는데 에이전트 파드가 스케줄되지 못하면 다시 만든다.
@@ -355,8 +360,10 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 | --- | --- |
 | `consonance/postgres:17` | 공식 `postgres:17` + 감독 프로세스 바이너리, ENTRYPOINT=감독 프로세스 |
 | `consonance/agent` | 에이전트 바이너리 + PostgreSQL 17 클라이언트 도구(`initdb` 포함) |
-| `consonance/operator` | 오퍼레이터 바이너리 |
-| `consonance/apiserver` | API 서버 바이너리 |
+| `consonance/operator` | 오퍼레이터 바이너리. `gcr.io/distroless/static-debian12:nonroot`(uid 65532) 위의 정적 바이너리 하나 |
+| `consonance/apiserver` | API 서버 바이너리. 오퍼레이터와 같은 distroless static nonroot(uid 65532) 위의 정적 바이너리 하나 |
+
+개발 환경(13장)에서 태그는 `consonance/postgres:17-dev`, `consonance/agent:dev`, `consonance/operator:dev`, `consonance/apiserver:dev`다. 이미지는 클러스터의 containerd에 직접 옮겨 놓으므로 오퍼레이터·API 서버 파드는 `imagePullPolicy: Never`다.
 
 ## 8. 네트워크 정책 (프로젝트 네임스페이스)
 
@@ -365,6 +372,7 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 - 브랜치 파드 8008(감독 프로세스): `consonance-system`의 오퍼레이터와 에이전트 파드에서만 허용.
 - 에이전트 파드 8443: `consonance-system`의 오퍼레이터와 API 서버에서만 허용.
 - `consonance-system`의 오퍼레이터와 API 서버는 파드 라벨 `app.kubernetes.io/name`(`consonance-operator`, `consonance-apiserver`)으로 가린다.
+- API 서버의 Secret 접근은 프로젝트별 RoleBinding으로 좁힌다(7.4). 네임스페이스 삭제는 ValidatingAdmissionPolicy `consonance-apiserver-namespace-delete`가 라벨 `app.kubernetes.io/managed-by: consonance-apiserver`가 있는 네임스페이스로만 제한한다.
 - 브랜치 파드 아웃바운드: 모두 거부(PostgreSQL은 밖으로 나갈 일이 없다). 에이전트 아웃바운드: 같은 네임스페이스와 DNS(`kube-system`의 53번 포트)만 허용.
 
 ## 9. 주요 흐름
@@ -438,7 +446,9 @@ main은 삭제할 수 없다(API 409). 그 밖의 브랜치는 파이널라이�
 ## 11. 관측
 
 - 로그: `log/slog` JSON. 공통 필드 `projectId`, `branch`, `requestId`, `op`.
+- `requestId`는 API 서버가 받은 헤더 `X-Request-Id`다. 오퍼레이터는 롤백·리셋 단계에서 에이전트와 감독 프로세스를 부를 때 같은 헤더(`spec.restore.requestId`)를 붙이고, 에이전트와 감독 프로세스는 받은 값을 로그 필드 `requestId`로 남긴다. 그 밖의 호출에는 헤더가 없다.
 - 메트릭(Prometheus): `consonance_branch_create_seconds`, `consonance_branch_first_ready_seconds`, `consonance_restore_seconds`, `consonance_start_seconds`, `consonance_project_create_seconds`, `consonance_copy_errors_total`.
+- 여섯 개 모두 오퍼레이터가 낸다. 객체의 생애 시각을 보는 쪽이 오퍼레이터이기 때문이다. controller-runtime 메트릭 서버(`:8080/metrics`)의 레지스트리에 등록하고, 개발 매니페스트에서는 인증 없이 클러스터 안에서만 열린다. 에이전트와 API 서버는 메트릭을 내지 않는다.
 
 ## 12. 테스트
 
@@ -448,7 +458,7 @@ main은 삭제할 수 없다(API 409). 그 밖의 브랜치는 파이널라이�
 | 단위 | `internal/pgctl` | 실제 PostgreSQL 17 바이너리로 백업 모드·기동·정지 검증 |
 | 단위 | `internal/httpapi` | controller-runtime 가짜 클라이언트 + 가짜 에이전트 클라이언트 |
 | 조정 로직 | `internal/controller` | envtest + 가짜 에이전트·감독 프로세스 클라이언트 |
-| E2E | 전체 | Lima VM의 k3s에 이미지를 올리고 시나리오 실행 |
+| E2E | 전체 | Podman 머신의 k3s 컨테이너(`hack/dev-cluster.sh`)에 이미지를 올리고 시나리오 실행. Mac에서 SQL은 `kubectl port-forward`로 브랜치 Service에 붙는다 |
 | 성능 | 전체 | E2E 환경에서 20회, 부하 없음·pgbench 쓰기 부하 두 조건 |
 
 E2E 시나리오: 프로젝트 생성 → 브랜치 생성 → 브랜치에 쓰기 → main 불변 확인 → 복구 지점 → 테이블 삭제 → 롤백 → 데이터 복원 확인 → 정지·기동 → 브랜치 삭제 → 프로젝트 삭제.
@@ -476,7 +486,27 @@ consonance/
 ```
 
 - Go 1.27 이상(툴체인 go1.27.2), 모듈 하나.
-- Make 대상: `test`, `test-xfs`(VM), `images`, `deploy-dev`(k3s), `e2e`, `perf`.
+- 개발 환경은 Podman 머신이다. k3s는 머신 안의 특권 컨테이너 `consonance-k3s`이고, PostgreSQL·XFS 단위 테스트는 머신의 컨테이너에서 돈다.
+- Make 대상:
+
+| 대상 | 동작 |
+| --- | --- |
+| `test` | 호스트 테스트(PostgreSQL·XFS 테스트는 건너뜀) |
+| `test-pg` | 머신의 컨테이너에서 PostgreSQL 17과 XFS로 전체 테스트 |
+| `test-xfs` | 머신의 컨테이너에서 XFS(reflink) 위의 `internal/volume` 테스트 |
+| `test-envtest` | envtest(쿠버네티스 API 서버)로 API 타입과 오퍼레이터 테스트 |
+| `envtest` | envtest의 API 서버와 etcd를 `bin/envtest`로 내려받음 |
+| `generate` | deepcopy, CRD, 오퍼레이터·API 서버의 ClusterRole 생성(controller-gen) |
+| `images` | 이미지 4종 빌드(`image-postgres`, `image-agent`, `image-operator`, `image-apiserver`) |
+| `smoke-postgres`, `smoke-agent`, `smoke-binaries` | postgres·에이전트·오퍼레이터와 API 서버 이미지의 스모크 테스트 |
+| `load-images` | 이미지 4종을 개발 클러스터의 containerd로 옮김 |
+| `dev-cluster` | 머신에 k3s와 스토리지 클래스 `consonance-xfs`를 띄우고 kubeconfig를 `bin/dev/kubeconfig`에 씀 |
+| `dev-cluster-down` | 개발 클러스터 컨테이너를 지움(볼륨은 남음) |
+| `dev-cluster-check` | `consonance-xfs` 볼륨이 reflink가 켜진 XFS인지 확인 |
+| `deploy-dev` | `config/default`를 kustomize로 적용하고 오퍼레이터와 API 서버를 다시 시작함(`:dev` 태그는 바뀌지 않으므로 새로 옮긴 이미지로 돌게 한다). 관리자 키는 `bin/dev/admin-key` |
+| `undeploy-dev` | 오퍼레이터와 API 서버를 지움(CRD, RBAC, 네임스페이스, 키는 남음) |
+| `e2e` | 개발 클러스터에서 12장의 E2E 시나리오 |
+| `perf` | 개발 클러스터에서 15장의 성능 측정, 결과를 `docs/perf/2026-10-26-branching-engine.md`에 씀 |
 
 ## 14. 기본값
 
@@ -499,6 +529,8 @@ consonance/
 3. 프로젝트 생성 시간을 측정해 기록한다.
 4. 모든 파드가 Pod Security Standard `restricted`로 실행된다.
 5. OpenAPI 문서가 생성된다.
+
+결과: [성능 측정 결과](../../perf/2026-10-26-branching-engine.md). 기준 8개(지표 4개 × 조건 2개) 중 6개를 통과했다. 쓰기 부하에서 브랜치 생성 P50(2.74초, 기준 1초)과 새 브랜치 첫 쿼리 P95(3.72초, 기준 3초)는 넘었고, 이는 개발 환경(Podman 머신의 가상 디스크와 호스트 경합)의 사실로 기록한다. 실제 스토리지에서 다시 재서 확인한다.
 
 ## 16. 열린 질문
 

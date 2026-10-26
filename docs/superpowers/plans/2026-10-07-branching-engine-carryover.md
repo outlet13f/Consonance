@@ -93,21 +93,6 @@ VM·이미지:
 
 ## 계획 3(CRD·오퍼레이터)에서
 
-### 계획 5(배포·E2E·성능)가 반영할 것
-
-- 오퍼레이터 Deployment는 `consonance-system`에서 파드 라벨 `app.kubernetes.io/name: consonance-operator`로 띄운다(API 서버는 `consonance-apiserver`). 네트워크 정책이 이 라벨로 오퍼레이터와 API 서버를 가린다. 서비스 계정에는 `config/rbac/role.yaml`의 ClusterRole `consonance-operator`를 묶고, 복제본이 여럿이면 `--leader-elect`를 켠다. 이미지는 `--agent-image`·`--postgres-image`로 준다.
-- `consonance/operator` 이미지는 아직 없다(스펙 7.6).
-- k3s(kube-router)에서 네트워크 정책이 kubelet 프로브를 막지 않는지, 에이전트의 DNS 이그레스(`kube-system`의 53번 포트)가 맞는지 E2E로 확인한다.
-- 스펙 11장의 메트릭은 에이전트에도 오퍼레이터에도 아직 없다. status의 `timings`(`dataReadyAt`, `runningAt`)와 `lastRestore`의 시각만 있다.
-- `requestId`: 오퍼레이터는 롤백·리셋 로그에 `spec.restore.requestId`를 남기지만 에이전트와 감독 프로세스에는 넘기지 않는다.
-- 에이전트 파드의 CPU 한도(100m)에서 initdb 시간을 잰다. 오퍼레이터의 init-main 호출 제한은 5분이다.
-- 개발용 스토리지 클래스 `consonance-xfs`(XFS + reflink)를 만든다. envtest는 PVC를 바인딩하지 않으므로 볼륨 바인딩과 `VolumeReady`는 E2E에서 처음 확인된다.
-- 오퍼레이터는 SIGTERM을 받으면 진행 중인 조정의 컨텍스트를 취소하고 끝나기를 기다린다(최대 30초). 끊긴 단계는 재시작 뒤 status에서 이어서 한다.
-- 매니페스트를 내기 전에 ClusterRole에서 쓰지 않는 권한을 줄인다. 대상은 Secret·PVC의 update·patch·delete, 파드의 update·patch, Service의 patch, 쿼터·네트워크 정책의 patch·delete, Branch의 patch·delete, status의 get·patch, 리스의 list·watch·patch·delete다. 리스와 이벤트 권한은 `consonance-system`의 Role로 옮긴다. 줄인 뒤 `cmd/operator`의 테스트를 돌린다. 그 테스트는 오퍼레이터 역할로 각 경로를 확인한다. 클러스터 밖에서 리더 선출을 켜려면 `--leader-election-namespace` 플래그를 추가해야 한다.
-- 브랜치 파드가 실행 중일 때 에이전트 파드를 바꾸는 경우(이미지 변경)를 네트워크 RWO 스토리지 클래스에서 E2E로 확인한다. 오퍼레이터는 새 에이전트 파드를 실행 중인 브랜치 파드의 노드에 둔다(필수 nodeAffinity).
-- 노드 장애를 넣어 조정 지연을 잰다. 응답 없는 감독 프로세스는 2초 제한으로 묻고, 2초에서 30초까지 늘려 가며 다시 묻는다.
-- 다국어(스펙 16장): 브랜치 이미지에서 ICU 정렬을 E2E로 확인한다(`pg_collation`의 ICU 정렬, `COLLATE "ko-x-icu"`·`"und-x-icu"`로 한글·악센트 정렬). 공식 `postgres:17`은 `--with-icu`로 빌드돼 있다. pg_bigm·PGroonga를 이미지에 넣을 수 있는지(Debian 패키지·빌드)도 본다. 넣을지는 스펙 16장에서 정한다.
-
 ### 미뤄 둔 개선 사항
 
 조정·상태:
@@ -141,21 +126,6 @@ VM·이미지:
 
 ## 계획 4(REST API 서버)에서
 
-### 계획 5(배포·E2E·성능)가 반영할 것
-
-- API 서버 Deployment는 `consonance-system`에서 파드 라벨 `app.kubernetes.io/name: consonance-apiserver`, ClusterRole `consonance-apiserver`(`config/rbac/apiserver/role.yaml`), Secret `consonance-admin-key`(키 `key`)를 파일로 마운트해 `--admin-key-file`로 준다. `consonance/apiserver` 이미지는 아직 없다(스펙 7.6).
-- 외부 노출(인그레스·TLS)은 계획 5에서 정한다. API 서버는 평문 HTTP로 듣는다.
-- E2E 시나리오(스펙 12장)는 이 API로 돈다.
-- 스펙 11장의 메트릭은 API 서버에도 없다(오퍼레이터·에이전트와 같이 계획 5).
-- API 서버 파드의 `terminationGracePeriodSeconds`는 40초 이상으로 둔다. 종료 때 진행 중인 요청(롤백 대기 최대 30초)을 35초까지 기다린다.
-- OpenAPI 문서(`internal/httpapi/openapi.json`)를 OpenAPI 3.1 검증기로 한 번 돌린다. 지금은 테스트로 경로·스키마만 맞춘다.
-- 리셋 요청을 받은 뒤 부모가 정지하면 오퍼레이터는 부모가 실행될 때까지 기다리고, 그동안 리셋을 취소할 방법이 없다(스펙 5장에 취소가 없다). API는 요청 시점의 부모 상태만 검사한다. 이 경우를 E2E에서 확인하고, 취소를 둘지 스펙에서 정한다.
-- 스펙 4.2의 Project phase `Pending`은 쓰는 코드가 없다(API는 phase가 빈 프로젝트를 `Provisioning`으로 보인다). 쓸지 목록에서 뺄지 스펙에서 정한다.
-- API 서버 플래그: `--listen-address`(기본 `:8080`, Service와 프로브 포트), `--storage-class`(기본 `consonance-xfs`, 다른 이름의 클래스면 지정), `--admin-key-file`(32바이트 이상). `GET /healthz`는 키 없이 열리므로 프로브에 Secret이 필요 없다.
-- API 서버 권한을 줄인다: 클러스터 전체 `secrets get`과 `namespaces create/delete`는 외부에 노출된 서비스에는 넓다. 프로젝트 네임스페이스마다 RoleBinding(`resourceNames: [db-credentials, internal-token]`)을 두거나, ValidatingAdmissionPolicy로 이 서비스 계정의 네임스페이스 삭제를 라벨 `app.kubernetes.io/managed-by: consonance-apiserver`가 있는 것으로 제한한다.
-- 인그레스(Envoy·Istio 등)가 바깥의 `X-Request-Id`를 덮어쓰지 않게 한다. 롤백·리셋의 멱등 키다.
-- 종료: SIGTERM을 받으면 바로 리스너를 닫으므로, 엔드포인트가 빠지는 몇 초 동안 새 요청이 거부된다. preStop에서 몇 초 기다리게 한다.
-
 ### 미뤄 둔 개선 사항
 
 API·핸들러:
@@ -173,3 +143,25 @@ API·핸들러:
 - 가짜 클라이언트는 쓴 것을 바로 읽고 `generation`을 올리지 않아, 캐시 지연과 `observedGeneration` 관문의 통과 쪽은 단위 테스트로 시험하지 않는다(envtest의 실행 파일 테스트가 일부를 본다).
 - 시험하지 않는 것: `validRequestID`의 CR·LF·NUL, `fromAgent`의 `reflink-unsupported`, `fromKube`의 `IsInvalid`, `storageSize` 경계(1Gi·1G), `compute: {}`, 정리 삭제 실패, 접속 URI의 IPv6·데이터베이스 이스케이프(`pgconn.ParseConfig`로), 준비 안 된 프로젝트의 복구 지점 목록·삭제, 진행 중인 복구를 새로 연 충돌 재시도.
 - 가짜 에이전트는 데이터 없는 브랜치의 복구 지점 생성에 404를 주지 않고 목록을 오래된 순으로 준다(실제는 최신 먼저). 실행 파일 테스트는 바이너리를 다섯 번 빌드한다.
+
+## 계획 5(배포·E2E·성능)에서
+
+### 다음 서브프로젝트가 반영할 것
+
+이 계획이 하지 않은 것:
+
+- 노드 장애 주입으로 조정 지연을 재는 것과, 브랜치 파드가 실행 중일 때 에이전트 파드를 바꾸는 경우(이미지 변경)의 E2E는 네트워크 RWO 스토리지 클래스에서 확인한다. 개발 환경은 단일 노드·로컬 스토리지라 재현할 수 없다. 오퍼레이터는 새 에이전트 파드를 실행 중인 브랜치 파드의 노드에 둔다(필수 nodeAffinity). 응답 없는 감독 프로세스는 2초 제한으로 묻고, 2초에서 30초까지 늘려 가며 다시 묻는다.
+- pg_bigm·PGroonga를 이미지에 넣을 수 있는지(Debian 패키지·빌드)와 넣을지는 스펙 16장의 결정을 기다린다. 공식 이미지에는 둘 다 없다.
+- 리셋 취소: 리셋 요청을 받은 뒤 부모가 정지하면 오퍼레이터는 부모가 실행될 때까지 기다리고, 그동안 리셋을 취소할 방법이 없다(스펙 5장에 취소가 없다). API는 요청 시점의 부모 상태만 검사한다. 이 경우를 E2E에서 확인하고, 취소를 둘지 스펙에서 정한다.
+- 스펙 4.2의 Project phase `Pending`은 쓰는 코드가 없다(API는 phase가 빈 프로젝트를 `Provisioning`으로 보인다). 쓸지 목록에서 뺄지 스펙에서 정한다.
+
+연결 게이트웨이 서브프로젝트로:
+
+- 외부 노출(인그레스·TLS). API 서버는 평문 HTTP로 듣고, 개발 환경의 E2E·성능은 `kubectl port-forward`를 쓴다.
+- 인그레스(Envoy·Istio 등)가 바깥의 `X-Request-Id`를 덮어쓰지 않게 한다. 롤백·리셋의 멱등 키다.
+
+성능 기준을 넘은 것(스펙 15장 2항, `docs/perf/2026-10-26-branching-engine.md`, 개발 환경의 Podman 머신 가상 디스크 위에서 8개 중 6개 통과):
+
+- 쓰기 부하에서 브랜치 생성 API P50 2.74초(기준 1초 이하). 백업 모드 복사의 즉시 체크포인트에서 쓰기 단계가 P50 1.34초(버퍼 약 9.4k개, sync 0.03초)다. CPU와 메모리는 원인에서 뺐다. `checkpoint_flush_after=0`, 더 공격적인 bgwriter(생성 P50 2.44초), `checkpoint_timeout=30s`(생성 P50 3.96초, 202 두 번)는 도움이 되지 않았다.
+- 쓰기 부하에서 새 브랜치 첫 쿼리 P95 3.72초(기준 3초 이하). 원인은 검증하지 않았다(가설: 복사하는 동안 main이 쓴 WAL의 재적용과 호스트 경합).
+- 다음 단계: 실제 스토리지(NVMe·로컬 SSD, 호스트 스왑 없음)에서 다시 잰다. 그래도 기준을 넘으면 설계 선택지는 셋이다. 최근 복구 지점과 WAL로 복사해 원본에 즉시 체크포인트를 걸지 않기, 복사 전에 분산 체크포인트를 미리 돌리기, 첫 쿼리의 복구(재적용) 비용 줄이기.

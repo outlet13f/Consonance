@@ -10,6 +10,6 @@
 | 2 | [볼륨 에이전트](2026-10-08-branching-engine-2-volume-agent.md) | `internal/volume`(reflink 복사, 세대, 카탈로그, 잠금·간격 제한, preflight, initdb), 에이전트 API·클라이언트, `consonance/agent` 이미지 | 구현 완료 |
 | 3 | [리소스 타입과 오퍼레이터](2026-10-12-branching-engine-3-operator.md) | Project·Branch CRD, Project·Branch 조정(롤백·리셋 포함), 파드·네트워크 정책 명세, envtest | 구현 완료 |
 | 4 | [REST API 서버](2026-10-24-branching-engine-4-apiserver.md) | 엔드포인트, 관리자 키 인증, problem+json, 동기 대기, OpenAPI | 구현 완료 |
-| 5 | [배포·E2E·성능](2026-10-26-branching-engine-5-deploy-e2e-perf.md) | 개발용 kustomize 매니페스트, 이미지 4종, Podman 머신의 k3s E2E 시나리오, 성능 측정, PSS restricted 검증, 권한 축소·메트릭·requestId | 작성 완료 |
+| 5 | [배포·E2E·성능](2026-10-26-branching-engine-5-deploy-e2e-perf.md) | 개발용 kustomize 매니페스트, 이미지 4종, Podman 머신의 k3s E2E 시나리오, 성능 측정, PSS restricted 검증, 권한 축소·메트릭·requestId | 구현 완료 |
 
 앞 계획의 구현에서 나온, 뒤 계획이 반영할 사항과 미뤄 둔 개선 사항은 [이월 사항](2026-10-07-branching-engine-carryover.md)에 모은다. 뒤 계획을 쓰기 전에 먼저 읽는다.
