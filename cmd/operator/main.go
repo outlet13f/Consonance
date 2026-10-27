@@ -97,6 +97,10 @@ func run(args []string) error {
 		HealthProbeBindAddress: c.probeAddr,
 		LeaderElection:         c.leaderElect,
 		LeaderElectionID:       "consonance-operator",
+		// The Deployment rolls out with Recreate: giving the lease up when the manager stops lets
+		// the new pod lead at once instead of after the 15s lease runs out. Safe because run
+		// returns and the process exits as soon as mgr.Start does.
+		LeaderElectionReleaseOnCancel: true,
 		// Empty outside --leader-elect: controller-runtime then reads no namespace at all.
 		LeaderElectionNamespace: leaderNamespace(c),
 		Cache:                   controller.CacheOptions(),
