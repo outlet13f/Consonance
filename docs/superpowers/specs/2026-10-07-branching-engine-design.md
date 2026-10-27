@@ -346,7 +346,7 @@ controller-runtime 기반. 모든 조정 단계는 멱등이다.
 
 ### 7.5 파드 명세 공통
 
-- 모든 파드: `runAsNonRoot`, uid/gid 999, `allowPrivilegeEscalation: false`, capabilities 전부 제거, seccomp `RuntimeDefault` → 쿠버네티스 Pod Security Standard `restricted` 충족.
+- 모든 파드: `runAsNonRoot`, `allowPrivilegeEscalation: false`, capabilities 전부 제거, seccomp `RuntimeDefault` → 쿠버네티스 Pod Security Standard `restricted` 충족. 에이전트·브랜치 파드는 uid/gid 999로 돌고, 오퍼레이터·API 서버 파드는 65532로 돈다(7.6).
 - 에이전트 파드: `fsGroup: 999`, `fsGroupChangePolicy: OnRootMismatch`(대용량 볼륨에서 재귀 chown 방지). 자원은 요청 CPU 100m·메모리 128Mi, 한도 CPU 1코어·메모리 128Mi다(QoS Burstable). CPU 한도를 요청과 같은 100m로 두면 1GB 복사의 CPU 0.11초가 스로틀링으로 0.86초쯤으로 늘어나 한 코어로 올렸다.
 - 브랜치 파드: 볼륨 subPath `branches/<name>` → `/pgdata`, emptyDir → `/var/run/postgresql`, Secret `internal-token`, main만 Secret `db-credentials`. 자원은 Branch compute.
 - 같은 PVC(RWO)를 쓰므로 브랜치 파드는 에이전트 파드와 같은 노드에 둔다(필수 podAffinity, `kubernetes.io/hostname`).
@@ -530,7 +530,7 @@ consonance/
 4. 모든 파드가 Pod Security Standard `restricted`로 실행된다.
 5. OpenAPI 문서가 생성된다.
 
-결과: [성능 측정 결과](../../perf/2026-10-26-branching-engine.md). 기준 8개(지표 4개 × 조건 2개) 중 6개를 통과했다. 쓰기 부하에서 브랜치 생성 P50(2.74초, 기준 1초)과 새 브랜치 첫 쿼리 P95(3.72초, 기준 3초)는 넘었고, 이는 개발 환경(Podman 머신의 가상 디스크와 호스트 경합)의 사실로 기록한다. 실제 스토리지에서 다시 재서 확인한다.
+결과: [성능 측정 결과](../../perf/2026-10-26-branching-engine.md). 기준 8개(지표 4개 × 조건 2개) 중 6개를 통과했다. 쓰기 부하에서 브랜치 생성 P50(2.74초, 기준 1초)과 새 브랜치 첫 쿼리 P95(3.72초, 기준 3초)는 넘었다. 개발 환경의 측정 사실로 기록하고, 원인은 추정(가상 디스크·호스트 경합, 첫 쿼리는 미검증)이다. 실제 스토리지에서 다시 재서 확인한다.
 
 ## 16. 열린 질문
 

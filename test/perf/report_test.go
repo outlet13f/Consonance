@@ -277,7 +277,7 @@ func intPercentile(v []int, p float64) int {
 	return int(percentile(d, p))
 }
 
-func bytesShort(n int64) string { return fmt.Sprintf("%.0fMB", float64(n)/(1<<20)) }
+func bytesShort(n int64) string { return fmt.Sprintf("%.0fMiB", float64(n)/(1<<20)) }
 
 // causeSection explains, when branch creation under write load misses its criterion, where the
 // time goes: this run's copy breakdown, and the bounded experiment of Task 11's fix round 1
@@ -314,7 +314,7 @@ func causeSection(w func(string, ...any), r *results) {
 	if len(failed.metrics) > 1 {
 		if q := failed.metrics[1]; q.target > 0 {
 			if ok, applies := q.passed(); applies && !ok {
-				w("- 같은 조건에서 새 브랜치 첫 쿼리도 기준을 넘었다(P95 %s, 기준 %s). **검증하지 않은 가설**: 새 브랜치는 복사하는 동안(에이전트의 복사 전체 P50 %s) main이 쓴 WAL을 기동할 때 다시 적용하므로 부하가 있으면 첫 접속까지가 길어지고, 여기에 호스트 경합이 더해졌을 것이다. 이 실행에서 가려내지 않았다. 같은 조건의 첫 전체 실행에서는 P95가 1.63초였다.\n",
+				w("- 같은 조건에서 새 브랜치 첫 쿼리도 기준을 넘었다(P95 %s, 기준 %s). **검증하지 않은 가설**: 새 브랜치는 복사하는 동안(에이전트의 복사 전체 P50 %s) main이 쓴 WAL을 기동할 때 다시 적용하므로 부하가 있으면 첫 접속까지가 길어지고, 여기에 호스트 경합이 더해졌을 것이다. 이 실행에서 가려내지 않았다. 2026-10-26 첫 전체 실행(ce6bce9)에서는 같은 조건의 P95가 1.63초였다.\n",
 					seconds(q.value()), seconds(q.target), seconds(percentile(failed.copies.agentCopy, 50)))
 			}
 		}
