@@ -2,7 +2,8 @@
 # and internal-token. The operator binds it to the API server's service account with a RoleBinding
 # in each project namespace (internal/controller/apiserver_access.go), so the API server has no
 # right to read other secrets. The operator may create those bindings through `bind` on this role
-# (config/rbac/role.yaml). Written by hand: controller-gen does not render resourceNames per
+# (config/rbac/role.yaml); it also holds secrets get cluster-wide today, so `bind` is redundant
+# for now and kept for when that read is narrowed. Written by hand: controller-gen does not render resourceNames per
 # namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

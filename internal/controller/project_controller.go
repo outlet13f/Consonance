@@ -55,7 +55,8 @@ const (
 //
 // The API server's RoleBinding to ClusterRole consonance-apiserver-project is kept like the
 // policies. Kubernetes lets the operator bind a role it does not hold itself only with `bind` on
-// that role, which it has for this one role by name.
+// that role, which it has for this one role by name (redundant while the operator reads secrets
+// cluster-wide, kept so the binding survives narrowing that read).
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=bind,resourceNames=consonance-apiserver-project
 

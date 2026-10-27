@@ -10,8 +10,9 @@ import (
 // namespace binds it to the ClusterRole consonance-apiserver-project, whose one rule names
 // db-credentials and internal-token (config/rbac/apiserver/project-role.yaml).
 //
-// The operator does not hold that role's permissions itself; it may create this binding because
-// its own role has `bind` on that ClusterRole by name.
+// The operator does hold `secrets get` cluster-wide today, so RBAC escalation prevention would
+// allow this binding even without `bind`. Its role still has `bind` on that ClusterRole by name,
+// so the binding stays allowed if the operator's own secret read is ever narrowed.
 func desiredAPIServerRoleBinding(ns string) *rbacv1.RoleBinding {
 	return &rbacv1.RoleBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: APIServerAccount, Namespace: ns, Labels: managedLabels("apiserver-access")},

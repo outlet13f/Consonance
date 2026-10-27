@@ -13,10 +13,10 @@ package httpapi
 // +kubebuilder:rbac:groups=consonance.io,resources=projects,verbs=get;list;watch;create
 // +kubebuilder:rbac:groups=consonance.io,resources=branches,verbs=get;list;watch;create;update;delete
 //
-// Secrets are not here: the API server reads db-credentials, uncached and one at a time, through
-// the RoleBinding the operator makes in each project namespace to ClusterRole
-// consonance-apiserver-project (config/rbac/apiserver/project-role.yaml), which names db-credentials
-// and internal-token. It has no cluster-wide right to read secrets.
+// Secrets are not here: the API server reads db-credentials and internal-token, uncached and one
+// at a time, through the RoleBinding the operator makes in each project namespace to ClusterRole
+// consonance-apiserver-project (config/rbac/apiserver/project-role.yaml), which names both
+// secrets. It has no cluster-wide right to read secrets.
 //
 // Deleting a namespace is further limited, by the ValidatingAdmissionPolicy in
 // config/policy/namespace-delete.yaml, to the namespaces labelled managed-by=consonance-apiserver.
