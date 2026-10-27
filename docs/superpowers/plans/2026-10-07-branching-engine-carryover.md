@@ -38,13 +38,12 @@ pgctl 부트스트랩:
 
 - `pg.Stop`과 `httpSrv.Shutdown` 사이에 온 `/v1/start`가 종료 직전에 PostgreSQL을 띄울 수 있다. `Shutdown` 뒤에 `pg.Stop`을 한 번 더 부른다.
 - 종료 로그에 신호 이름이 없다. `--help`가 종료 코드 1로 끝난다. `httpSrv.Serve` 오류를 버린다.
-- 통합 테스트: `-race` 없이 빌드하고, `cmd.Wait`에 기한이 없고, 실패하면 VM에 postmaster가 남을 수 있고, 부트스트랩은 오류가 없는지만 본다.
+- 통합 테스트: `-race` 없이 빌드하고, `cmd.Wait`에 기한이 없고, 실패하면 postmaster가 남을 수 있고, 부트스트랩은 오류가 없는지만 본다.
 
 이미지·스크립트·테스트 도우미:
 
 - 스모크 테스트 정리(`docker rm -f`)에 `-v`가 없어 실행할 때마다 기반 이미지의 익명 볼륨이 남는다. 종료 코드 0과 "fast shutdown" 로그를 확인하지 않고, `grep -q`와 pipefail이 SIGPIPE로 흔들릴 수 있고, 포트를 모든 인터페이스에 열고, `--pull=never`가 없다.
-- `.dockerignore`가 `.superpowers`, `test`, `hack`, `images`를 빼지 않아 빌드 캐시가 자주 깨진다. 출시 전에 기반 이미지 태그를 다이제스트로 고정한다.
-- `hack/vm-test.sh`에 패키지 패턴 없이 플래그만 주면 `.`만 테스트한다. `hack/vm-setup.sh`는 `limactl start` 실패를 `|| true`로 숨기고, `NEEDRESTART_SUSPEND=1`이 없고, Go 압축 파일의 SHA-256을 확인하지 않는다.
+- `.dockerignore`가 `test`, `hack`, `images`를 빼지 않아 빌드 캐시가 자주 깨진다. 출시 전에 기반 이미지 태그를 다이제스트로 고정한다.
 - `TestFreePortIsUsable`은 포트 범위만 확인한다. `SocketDir` 테스트가 없고, `InitDB` 테스트는 `PG_VERSION`이 17인지 보지 않는다. `SharedBuffers` 표에 음수, 정확한 경계, 내림 사례가 없다. `Args`는 입력을 검증하지 않는다.
 
 ## 계획 2(볼륨 에이전트)에서
@@ -86,10 +85,10 @@ API·클라이언트·실행 파일:
 - 에이전트 API: 성공 본문·Content-Type, 틀린 토큰, `Retry-After` 하한, 5xx를 Error 수준으로 남기는 규칙을 시험하지 않는다. 클라이언트: 2xx 디코드 실패, ctx 취소, 기본 제한 60초를 시험하지 않는다.
 - pgctl: `Start`의 "postgres exited during startup" 경로(종료 코드 1을 내는 가짜 실행 파일)와 `ErrNoDataDir`→500 처리기를 시험하지 않는다. `resolveDir`가 `EvalSymlinks` 오류를 버려 EACCES·ELOOP·ENOTDIR가 모두 "does not resolve"가 된다.
 
-VM·이미지:
+이미지·테스트 도우미:
 
-- `make test-xfs`에 `-count=1`이 없어 XFS 마운트를 잃어도 캐시된 ok가 나올 수 있다. `xfstest`의 확인은 reflink를 보지 않고, `Dir`의 건너뛰기·정리 계약에 테스트가 없고, `RemoveAll` 오류를 버린다. `vm-setup.sh`는 이미지 파일이 있는지만 보고 그 안에 파일 시스템이 있는지는 보지 않는다.
-- 스모크 테스트에 CPU 한도(100m)가 없다. curl이 시간 초과로 끝나면 `docker logs`·OOMKilled를 보이기 전에 스크립트가 끝난다. colima에 buildx가 없어 빌드할 때마다 약 1.4GB의 이름 없는 빌드 단계 이미지가 남는다.
+- `xfstest`의 확인은 reflink를 보지 않고, `Dir`의 건너뛰기·정리 계약에 테스트가 없고, `RemoveAll` 오류를 버린다.
+- 스모크 테스트에 CPU 한도(100m)가 없다. curl이 시간 초과로 끝나면 `docker logs`·OOMKilled를 보이기 전에 스크립트가 끝난다.
 
 ## 계획 3(CRD·오퍼레이터)에서
 
@@ -162,6 +161,32 @@ API·핸들러:
 
 성능 기준을 넘은 것(스펙 15장 2항, `docs/perf/2026-10-26-branching-engine.md`, 개발 환경의 Podman 머신 가상 디스크 위에서 8개 중 6개 통과):
 
-- 쓰기 부하에서 브랜치 생성 API P50 2.74초(기준 1초 이하). 백업 모드 복사의 즉시 체크포인트에서 쓰기 단계가 P50 1.34초(버퍼 약 9.4k개, sync 0.03초)다. CPU와 메모리는 원인에서 뺐다. `checkpoint_flush_after=0`, 더 공격적인 bgwriter(생성 P50 2.44초), `checkpoint_timeout=30s`(생성 P50 3.96초, 202 두 번)는 도움이 되지 않았다.
-- 쓰기 부하에서 새 브랜치 첫 쿼리 P95 3.72초(기준 3초 이하). 원인은 검증하지 않았다(가설: 복사하는 동안 main이 쓴 WAL의 재적용과 호스트 경합).
-- 다음 단계: 실제 스토리지(NVMe·로컬 SSD, 호스트 스왑 없음)에서 다시 잰다. 그래도 기준을 넘으면 설계 선택지는 셋이다. 최근 복구 지점과 WAL로 복사해 원본에 즉시 체크포인트를 걸지 않기, 복사 전에 분산 체크포인트를 미리 돌리기, 첫 쿼리의 복구(재적용) 비용 줄이기.
+- 쓰기 부하에서 브랜치 생성 API P50 2.74초(기준 1초 이하). 백업 모드 복사의 즉시 체크포인트에서 쓰기 단계가 P50 1.34초(버퍼 약 9.4k개, sync 0.03초)다. main의 CPU 한도를 2로 늘려 스로틀링을 없애도 쓰기 시간이 그대로여서 CPU 한도는 주된 원인이 아니고, `memory.pressure`는 10ms 이하로 남았다. `checkpoint_flush_after=0` 행에서는 1Gi memcg의 더러운 페이지 한계에 닿아 쓰기가 장치의 writeback 속도로 묶이는 것이 보였다. `checkpoint_flush_after=0`, 더 공격적인 bgwriter(생성 P50 2.44초), `checkpoint_timeout=30s`(생성 P50 3.96초, 202 두 번)는 도움이 되지 않았다. 호스트 경합의 몫은 따로 가려내지 못했다.
+- 쓰기 부하에서 새 브랜치 첫 쿼리 P95 3.72초(기준 3초 이하). 원인은 검증하지 않았다(가설: 복사하는 동안 main이 쓴 WAL의 재적용과 호스트 경합). 2026-10-26 첫 전체 실행(ce6bce9)에서는 같은 조건의 P95가 1.63초로 통과했다. 같은 조건이 실행마다 기준의 양쪽에 놓였으므로 이 지표는 경합에 민감하다.
+- 다음 단계: 실제 스토리지(NVMe·로컬 SSD, 호스트 스왑 없음)에서 다시 잰다. 그래도 기준을 넘으면 설계 선택지는 셋이다. 최근 복구 지점과 WAL로 복사해 원본에 즉시 체크포인트를 걸지 않기, 복사 전에 분산 체크포인트를 미리 돌리기, 첫 쿼리의 복구(재적용) 비용 줄이기(검증하지 않은 WAL 재적용 가설에 기댄 선택지다. 먼저 첫 쿼리 시간에서 재적용이 차지하는 몫을 잰다).
+
+### 미뤄 둔 개선 사항
+
+오퍼레이터·RBAC:
+
+- Project의 RoleBinding `consonance-apiserver`의 roleRef가 바뀌었거나 라벨이 없는 같은 이름의 RoleBinding이 있으면(누가 손댄 뒤에만 생긴다) roleRef는 바꿀 수 없는 필드라 갱신이 오류를 되풀이한다. 이 오류가 Project 조정의 1단계를 막아 부트스트랩과 사용량 갱신이 멈춘다(손댄 RoleBinding을 되돌리기 전에는 풀리지 않는다). RoleBinding을 지우고 다시 만들게 한다.
+- 정책 테스트(`consonance-apiserver-namespace-delete`)는 라벨 값의 대소문자 변형, `deletecollection`, 테스트가 남기는 네임스페이스를 시험하지 않는다(역할에 `deletecollection`이 없다). `bind`는 오퍼레이터가 클러스터 전체 `secrets get`을 가진 동안 중복이라 테스트로 증명할 수 없다.
+- 메트릭: `start_seconds`를 `settled()` 지점에서 status를 저장하기 전에 관측한다(중복·누락은 없다). 테스트 도우미 `settle()`은 앞선 테스트의 늦은 재시도와 `copy_errors`를 다루지 못할 수 있다. 기록·저장 경로를 다시 조정으로 강제하는 테스트가 없다. Ready였던 프로젝트가 Provisioning인 채로 오퍼레이터가 다시 시작하면 `project_create`를 한 번 더 관측한다.
+- 컨트롤러: 지워지는 파드(DeletionTimestamp)는 잠깐 동안 Ready=True로 남는다.
+
+API 서버:
+
+- `GET /v1/status`를 Info 수준으로 남긴다. 고른 requestId가 붙은 401, 응답 래퍼의 `Unwrap()`, requestId 되돌리기를 시험하지 않는다. `TestReset`에 음성 사례가 없다.
+- OpenAPI 테스트가 얕고, `started()` 문서가 없고, `http.ErrAbortHandler`는 로그 줄도 테스트도 없다.
+
+배포 스크립트·매니페스트:
+
+- `hack/dev-cluster.sh`: `up`의 기동 분기가 `configured` 상태를 다루지 않는다(`created`는 다룬다). 6443 확인이 어떤 서비스든 받아들이고 래퍼 인자를 따옴표로 묶지 않는다. 대기 루프가 말이 없고 시간 초과 때 k3s 로그를 보이지 않는다. `check`는 파일 시스템 종류를 출력만 하고 판정하지 않는다(`cp --reflink=always`가 reflink 없는 곳에서는 실패한다).
+- `hack/load-images.sh`: 멈춘 머신을 "클러스터가 실행 중이 아님"으로 보고한다. `hack/pg-test.sh`: 이미 있는 XFS 디렉터리의 소유자를 `install -d`가 다시 바꾸고, 머신이 멈췄을 때 안내가 없다.
+- 하위 kustomization이 파일을 이름으로 나열하고, `rollout status` 대기가 겹친다. 테스트 도우미 `readYAMLDocs`는 `\n---\n`로만 문서를 나눈다.
+
+E2E·성능 하니스:
+
+- `go test` 시간 초과(panic)나 Ctrl-C로 끝나면 정리가 돌지 않아 port-forward 자식 프로세스와 `cns-` 네임스페이스가 남을 수 있다(`go test`의 한계).
+- 쓰기 부하 롤백은 요청 전에 재확인하지 않는다. `rb`의 평균 tps에 종료 때의 0 tps 줄이 들어간다. `end()`가 원격 pgbench를 `-T 7200`으로만 끝이 묶인 채 둘 수 있다.
+- 성능 문서의 "측정한 코드" 커밋 표기는 `gitCommit`이 `test/`·`docs/`를 더러움 검사에서 빼므로, 고치지 않은 하니스로 돌렸는지 알려 주지 않는다(`4ed33e8` 실행은 7ec213c의 하니스를 썼다). 하니스 변경을 따로 표시한다.
