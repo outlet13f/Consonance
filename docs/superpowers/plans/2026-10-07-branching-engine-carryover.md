@@ -169,7 +169,7 @@ API·핸들러:
 
 오퍼레이터·RBAC:
 
-- Project의 RoleBinding `consonance-apiserver`의 roleRef가 바뀌었거나 라벨이 없는 같은 이름의 RoleBinding이 있으면(누가 손댄 뒤에만 생긴다) roleRef는 바꿀 수 없는 필드라 갱신이 오류를 되풀이한다. 이 오류가 Project 조정의 1단계를 막아 부트스트랩과 사용량 갱신이 멈춘다(손댄 RoleBinding을 되돌리기 전에는 풀리지 않는다). RoleBinding을 지우고 다시 만들게 한다.
+- Project의 RoleBinding `consonance-apiserver`의 roleRef가 바뀌었거나 라벨이 없는 같은 이름의 RoleBinding이 있으면(누가 손댄 뒤에만 생긴다) 조정이 오류를 되풀이한다(roleRef가 바뀐 것은 바꿀 수 없는 필드라 갱신이, 라벨이 없는 것은 라벨로 거른 캐시에 보이지 않아 생성이 AlreadyExists로 실패한다). 이 오류가 Project 조정의 1단계를 막아 부트스트랩과 사용량 갱신이 멈춘다(손댄 RoleBinding을 되돌리기 전에는 풀리지 않는다). RoleBinding을 지우고 다시 만들게 한다.
 - 정책 테스트(`consonance-apiserver-namespace-delete`)는 라벨 값의 대소문자 변형, `deletecollection`, 테스트가 남기는 네임스페이스를 시험하지 않는다(역할에 `deletecollection`이 없다). `bind`는 오퍼레이터가 클러스터 전체 `secrets get`을 가진 동안 중복이라 테스트로 증명할 수 없다.
 - 메트릭: `start_seconds`를 `settled()` 지점에서 status를 저장하기 전에 관측한다(중복·누락은 없다). 테스트 도우미 `settle()`은 앞선 테스트의 늦은 재시도와 `copy_errors`를 다루지 못할 수 있다. 기록·저장 경로를 다시 조정으로 강제하는 테스트가 없다. Ready였던 프로젝트가 Provisioning인 채로 오퍼레이터가 다시 시작하면 `project_create`를 한 번 더 관측한다.
 - 컨트롤러: 지워지는 파드(DeletionTimestamp)는 잠깐 동안 Ready=True로 남는다.
