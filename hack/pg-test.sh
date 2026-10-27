@@ -24,7 +24,7 @@ if [ -t 0 ] && [ -t 1 ]; then TTY=(-t); fi
 # only (the machine's SELinux mode stays Enforcing). /tmp is a tmpfs because the container's
 # own filesystem sits on the machine's XFS and would clone files: tests that use t.TempDir()
 # as "not XFS" need a filesystem without reflink.
-exec podman run --rm ${TTY[@]+"${TTY[@]}"} --userns=keep-id --security-opt label=disable \
+exec podman run --rm --name "consonance-pg-test-$$" ${TTY[@]+"${TTY[@]}"} --userns=keep-id --security-opt label=disable \
   -v "$ROOT:$ROOT" -w "$ROOT" \
   -v consonance-gocache:/gocache \
   -v "$XFS_HOST_DIR:/xfs/test" \

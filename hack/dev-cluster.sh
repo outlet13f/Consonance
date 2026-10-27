@@ -14,7 +14,9 @@
 # Usage: hack/dev-cluster.sh up | down [--purge] | kubeconfig | check
 #   up          create (or start) the cluster, wait for the node, apply the StorageClass,
 #               write the kubeconfig. Safe to repeat: a running cluster is left alone.
-#   down        remove the container. Volumes in /var/lib/consonance/storage stay unless --purge.
+#   down        remove the container. Plain down leaves the data and pvc directories in
+#               /var/lib/consonance/storage; --purge removes them (and fails if the container
+#               is still there).
 #   kubeconfig  rewrite bin/dev/kubeconfig (and the wrapper if 6443 is not reachable).
 #   check       prove that consonance-xfs volumes are on XFS and support reflink, in a
 #               throwaway restricted pod; everything it creates is deleted afterwards.
@@ -66,8 +68,8 @@ up() {
 write_kubeconfig() {
   mkdir -p "$OUT"
   # k3s writes the file with server https://127.0.0.1:6443, which is what the Mac reaches.
-  rpodman exec "$NAME" cat /etc/rancher/k3s/k3s.yaml >"$OUT/kubeconfig.tmp"
-  chmod 600 "$OUT/kubeconfig.tmp"
+  # It holds a cluster-admin client key: created private, not chmod-ed after the fact.
+  ( umask 077; rpodman exec "$NAME" cat /etc/rancher/k3s/k3s.yaml >"$OUT/kubeconfig.tmp" )
   mv "$OUT/kubeconfig.tmp" "$OUT/kubeconfig"
   if curl -sk -m 5 -o /dev/null "https://127.0.0.1:$PORT/version"; then
     rm -f "$OUT/kubectl"
@@ -85,6 +87,11 @@ WRAP
 down() {
   rpodman rm -f "$NAME" >/dev/null 2>&1 || true
   if [ "${1:-}" = "--purge" ]; then
+    # Never wipe the storage under a cluster that is still there.
+    if [ -n "$(state)" ]; then
+      echo "$NAME still exists after removal (state: $(state)); not purging $STORAGE_DIR" >&2
+      exit 1
+    fi
     podman machine ssh "sudo rm -rf $STORAGE_DIR && sudo install -d $STORAGE_DIR"
     echo "purged $STORAGE_DIR"
   fi
